@@ -1,0 +1,8 @@
+{
+  "nsec-observed.txt": "8a854191a49ddbf37fdf36352ccaa167a161a0711cf3708c615c137a9b783eb0",
+  "nsec-root-ds.txt": "d7b623cf73e9bb24971752d3e991fd075b7a4257515a8f635a26183d81e91403",
+  "observations.json": "8b9be8cd0105392f69319fdb379c7d574f5a16c2e5c2a0f6711a9f26bf70519a",
+  "p21-nsec-parent-candidates.txt": "bdaff31df21b5ca3ad78df050d3339a4a50aaa8a5a66e535c67858f15e6f7670",
+  "summary.json": "134a89b8041dd780bc3368939659157fbe1d7cbb8b3188f9ae0b9ba592581608",
+  "tld_results.csv": "582f34690cd8c46d5252e64fa193bc42359423cb7d3d952edde251ccd01022a5"
+}

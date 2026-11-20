@@ -1,0 +1,138 @@
+(*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: algorithm_downgrade.pv
+ *
+ * Algorithm Downgrade Attack Model (ProVerif)
+ * Property 13: Algorithm Downgrade - unsupported algorithms bypass validation
+ *)
+
+(* Types *)
+type key.
+type algorithm.
+type rr_data.
+type qid_t.
+type qname_t.
+type signature.
+
+(* Channels *)
+free c: channel.
+free resolver_ch: channel [private].
+free ns_ch: channel [private].
+free client_ch: channel [private].
+
+(* Constants *)
+const A: bitstring.
+const RR: bitstring.
+const alg8: algorithm.
+const alg16: algorithm.
+const addr1234: bitstring.
+
+(* Functions *)
+fun pk(key): key.
+fun sign(bitstring, key): signature.
+fun h(bitstring): bitstring.
+
+(* Signature verification *)
+reduc forall m: bitstring, k: key; verify(sign(m, k), pk(k), m) = true.
+
+(* Events *)
+event CreateQID(qid_t).
+event ClientQuery(channel, qname_t).
+event ResolverQuery(channel, qname_t).
+event ServerSent(bitstring).
+event Accept(bitstring).
+event ResolverVerifFail(bitstring, algorithm, signature, key).
+event Downgraded(bitstring).
+event AttackerIntercept(qid_t, bitstring, algorithm, algorithm).
+
+(* Queries - ProVerif style security properties *)
+
+(* Query IDs must be unique *)
+query qid: qid_t; event(CreateQID(qid)) ==> event(CreateQID(qid)).
+
+(* Authenticity: anything accepted must have been sent by the authoritative server *)
+query rr: bitstring; event(Accept(rr)) ==> event(ServerSent(rr)).
+
+(* Downgrade attack is possible *)
+query rr: bitstring; event(Downgraded(rr)).
+
+(* Client process: stateless stub, sends one query & waits one answer *)
+let Client(c_ip: channel, resolver_ip: channel) =
+    new qid: qid_t;
+    event CreateQID(qid);
+    new qname: qname_t;
+    let c2r_query = (c_ip, qname, A, qid) in
+    out(resolver_ip, c2r_query);
+    event ClientQuery(c_ip, qname);
+    (* receive answer *)
+    in(c_ip, answer: bitstring).
+
+(* Authoritative server process *)
+let Authoritative(zsk8: key, zsk16: key, ns_ip: channel) =
+    !(
+        in(ns_ip, (qname: qname_t, qid: qid_t));
+        let rr = (RR, qname, addr1234) in
+        let sig8 = sign(rr, zsk8) in
+        let sig16 = sign(rr, zsk16) in
+        let dk8 = pk(zsk8) in
+        let dk16 = pk(zsk16) in
+        out(c, (qid, rr, alg8, sig8, dk8, alg16, sig16, dk16));
+        event ServerSent(rr)
+    ).
+
+(* Recursive resolver process *)
+let Resolver(resolver_ip: channel, ns_ip: channel, pk8: key) =
+    !(
+        (* receive client query *)
+        in(resolver_ip, (c_ip: channel, qname: qname_t, =A, qid: qid_t));
+        event ResolverQuery(resolver_ip, qname);
+        (* forward to authoritative NS *)
+        out(ns_ip, (qname, qid));
+        (* receive answer back - now listening on public channel for MitM *)
+        in(c, (=qid, rr: bitstring, alg1: algorithm, sig1: signature,
+               dnskey1: key, alg2: algorithm, sig2: signature, dnskey2: key));
+        (* simple validation *)
+        if alg1 = alg8 then
+            (
+                if (dnskey1 = pk8) && (verify(sig1, dnskey1, rr) = true) then
+                    (
+                        event Accept(rr);
+                        out(c_ip, rr)
+                    )
+                else
+                    event ResolverVerifFail(rr, alg1, sig1, dnskey1)
+            )
+        else
+            (
+                event Downgraded(rr);
+                out(c_ip, rr)
+            )
+    ).
+
+(* MitM attacker: intercepts queries and can downgrade the algorithm *)
+let MitMAttacker() =
+    !(
+        in(c, (qid: qid_t, rr: bitstring, alg1: algorithm, sig1: signature,
+               dnskey1: key, alg2: algorithm, sig2: signature, dnskey2: key));
+        event AttackerIntercept(qid, rr, alg1, alg16);
+        (* Downgrade to algorithm 16 *)
+        out(c, (qid, rr, alg16, sig1, dnskey1, alg2, sig2, dnskey2))
+    ).
+
+(* Main process *)
+process
+    (* Generate keys *)
+    new zsk8: key;
+    new zsk16: key;
+    let pk8 = pk(zsk8) in
+
+    (* Create private channels *)
+    new client_ip: channel;
+    new resolver_ip: channel;
+    new ns_ip: channel;
+
+    (* Run all processes in parallel *)
+    Client(client_ip, resolver_ip) |
+    Resolver(resolver_ip, ns_ip, pk8) |
+    Authoritative(zsk8, zsk16, ns_ip) |
+    MitMAttacker()

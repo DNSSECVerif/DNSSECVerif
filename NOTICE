@@ -1,0 +1,19 @@
+DNSSECVerif
+
+The authors' software, formal models, and documentation in this repository,
+including files without an individual license header, are licensed under the
+GNU General Public License, version 3 only (SPDX: GPL-3.0-only), not "v3 or
+later". LICENSE contains the complete terms, reproduced from
+https://www.gnu.org/licenses/gpl-3.0.txt. This software is distributed without
+any warranty, including the implied warranties of merchantability or fitness
+for a particular purpose.
+
+Tamarin, SAPIC+, ProVerif, Maude, Docker, operating-system packages, and other
+external dependencies retain their own licenses. References to RFCs do not
+relicense the RFC documents. The IANA and root-zone snapshots and public DNS
+responses in measurements/tld-census/ retain any applicable third-party rights;
+their inclusion does not claim authorship of those records.
+
+GPLv3 does not apply to the published paper, which carries its own license. The
+paper's TLD table in measurements/tld-census/ is included as a test input, not
+as a redistribution of the paper.

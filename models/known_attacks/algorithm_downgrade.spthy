@@ -1,0 +1,129 @@
+/*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: algorithm_downgrade.spthy
+ *
+ * Algorithm Downgrade Attack Model (Known Attack Validation)
+ * Property 13: Algorithm Downgrade - unsupported algorithms bypass validation
+ */
+
+theory DNSSEC_Downgrade
+// Minimal DNSSEC model showing algorithm downgrade vulnerability
+
+begin
+
+builtins: hashing, signing
+functions: h/1, natural/1, sign/2, verify/3, pk/1 //the natural function can change bitstring to natural number
+
+
+
+/*
+   Client: stateless stub, sends one query & waits one answer
+   Arguments:
+     ~c_ip       – client address / channel
+     ~resolver_ip – resolver address / channel
+*/
+let Client(~c_ip, ~resolver_ip) =
+    new ~qid;
+    event CreateQID(~qid);
+    new ~qname;                     // queried domain (abstract)
+    let c2r_query = <~c_ip, ~qname, 'A', ~qid> in
+        out(~resolver_ip, c2r_query);
+    event ClientQuery(~c_ip, ~qname);
+    // receive answer
+    in(<~c_ip, answer>)
+
+/*
+   Authoritative server: holds one zone‑signing key and always returns
+   RR + RRSIG + DNSKEY
+   Args: ~zsk – signing key (sk)
+*/
+let Authoritative(~zsk8, ~zsk16, ~ns_ip) =
+    !(
+        in(~ns_ip, <qname, qid>);
+        let rr  = <'RR', qname, '1234'> in
+        let sig8 = sign(rr, ~zsk8) in
+        let sig16 = sign(rr, ~zsk16) in
+        let dk8 = pk(~zsk8) in
+        let dk16 = pk(~zsk16) in
+        out(<qid, <rr, '8', sig8, dk8, '16', sig16, dk16>>);
+        event ServerSent(rr)
+    )
+
+/*
+   Recursive resolver: supports exactly ONE algorithm / trust anchor pk(~zsk)
+   Args:
+     ~resolver_ip – channel
+     ~ns_ip       – channel toward authoritative NS
+     ~trust_pk    – trusted DNSKEY
+*/
+let Resolver(~resolver_ip, ~ns_ip, pk8) =
+    !(
+        // receive client query
+        in(~resolver_ip, <c_ip, qname, 'A', qid>);
+        event ResolverQuery(~resolver_ip, qname);
+        // forward to authoritative NS, tagging with qid as return channel
+        out(~ns_ip, <qname, qid>);
+        // receive answer back on qid channel
+        in(qid, <rr, alg1, sig1, dnskey1, alg2, sig2, dnskey2>);
+        // simple validation
+        if (alg1 = '8') then
+            (
+            if (dnskey1 = pk8) & (verify(sig1, rr, dnskey1) = true) then
+                (
+                    event Accept(rr);
+                    out(c_ip, rr)
+                )
+            else
+                (
+                    event ResolverVerifFail(rr, alg1, sig1, dnskey1)
+                )
+            )
+        else
+            (
+                event Downgraded(rr);
+                out(c_ip, rr)
+            )
+    )
+
+
+/*
+   MitM attacker: intercepts queries and can downgrade the algorithm
+   Args:
+     alg_id – algorithm ID to downgrade to (e.g., '16')
+*/
+let MitMAttacker(alg_id) = 
+!(
+    in(<qid, <rr, alg1, sig1, dnskey1, alg2, sig2, dnskey2>>);
+    event AttackerIntercept(qid, rr, alg1, alg_id);
+    out(<qid, <rr, alg_id, sig1, dnskey1, alg2, sig2, dnskey2>>)
+)
+
+process:
+    new ~client_ip;
+    new ~resolver_ip;
+    new ~ns_ip;
+    new ~zsk8;
+    new ~zsk16;
+
+    let pk8 = pk(~zsk8) in //zone signing secret key
+
+    Client(~client_ip, ~resolver_ip) |
+    Resolver(~resolver_ip, ~ns_ip, pk8) |
+    Authoritative(~zsk8, ~zsk16, ~ns_ip) |
+    MitMAttacker('16') // Attacker downgrades to algorithm '16'
+
+
+// Query IDs must be unique
+restriction UniqueQID:
+    "All x #i #j. CreateQID(x)@#i & CreateQID(x)@#j ==> #i = #j"
+
+// Authenticity: anything the client receives and the resolver treats as
+// validated must have been sent by the authoritative server earlier.
+lemma authenticity:
+    "All rr #i. Accept(rr)@#i ==> (Ex #j. ServerSent(rr)@#j & #j < #i)"
+
+
+lemma downgrade_possible: 
+  "Ex rr #i. Downgraded(rr)@#i"
+
+end

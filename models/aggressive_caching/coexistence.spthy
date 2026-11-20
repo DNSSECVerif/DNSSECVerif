@@ -1,0 +1,260 @@
+/*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: coexistence.spthy
+ *
+ * NSEC/NSEC3 Coexistence Attack model (SAPIC+/Tamarin)
+ * Property 21: Denial Exclusivity - mixed NSEC/NSEC3 enables semantic mismatch attacks
+ */
+
+ theory NSEC_NSEC3_coexistence
+ begin
+ 
+ builtins: hashing, natural-numbers, signing
+ functions: h/1, IH/3, natural/1, GetOrder1/1, GetOrder2/1, GetOrder3/1, sign/2, verify/3, pk/1 //the natural function can change bitstring to natural number
+ equations: 
+//IH(salt,x,%0) = h(<x,salt>),
+IH(salt,x,%1) = h(<h(<x, salt>),salt>),
+// get order is for comparasion in the server
+GetOrder1(<z1,z2,z3>) = z1,
+GetOrder2(<z1,z2,z3>) = z2,
+GetOrder3(<z1,z2,z3>) = z3
+
+
+let ServerReceive(~serverIP,~salt,%iterations:nat,orderHash1, orderHash2, orderHash3,
+    ~ownerIP1, ~ownerIP2, ~ownerIP3, order, %label:nat, ~secKey) =
+    !(
+
+        // the label number is for wildcard reponse
+        // if the query exists, the label number will be label+1
+        let %existLabel:nat = %label %+ %1 in
+        // out(<resolverIP, rootIP, rootQueryName>);
+        in(<resolverIP1,recServerIP, queryName>);
+        if recServerIP = ~serverIP then
+        (
+            let hashQueryName = IH(~salt,queryName,%iterations) in
+            if hashQueryName = orderHash1 then
+            (
+                let msg = <~serverIP, resolverIP1, ~salt, %iterations,~ownerIP1, orderHash1, orderHash1, %existLabel> in
+                let sig = sign(msg, ~secKey) in
+                out(<~serverIP, resolverIP1, ~salt, %iterations,~ownerIP1, orderHash1, orderHash1, %existLabel, sig>);
+                event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP1, orderHash1, orderHash1);
+                event ResolverKnowDomainName(resolverIP1, queryName)
+            )
+            else if hashQueryName = orderHash2 then
+            (
+                let msg = <~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP2, orderHash2, orderHash2, %existLabel> in
+                let sig = sign(msg, ~secKey) in
+                out(<~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP2, orderHash2, orderHash2, %existLabel, sig>);
+                event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP2, orderHash2, orderHash2);
+                event ResolverKnowDomainName(resolverIP1, queryName)
+            )
+            else
+            (
+                event QueryNameNonExist(~serverIP, resolverIP1, queryName);
+                // find the closest one
+                // get the greater than and less than relation of the query name and the owner names
+                let order1 = GetOrder1(order) in
+                let order2 = GetOrder2(order) in
+                let order3 = GetOrder3(order) in
+                if order1='true' then
+                (
+                    new ~plainName;
+                    let msg = <~serverIP, resolverIP1,~salt, %iterations,'wildcard',~plainName,orderHash1,%label> in
+                    let sig = sign(msg, ~secKey) in
+                    out(<~serverIP, resolverIP1,~salt, %iterations,'wildcard',~plainName,orderHash1,%label, sig>);
+                    event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, 'wildcard', ~plainName, orderHash1)
+                )
+                else if order2='true' then
+                (
+                    let msg = <~serverIP, resolverIP1,~salt, %iterations,'wildcard',orderHash1,orderHash2,%label> in
+                    let sig = sign(msg, ~secKey) in
+                    out(<~serverIP, resolverIP1,~salt, %iterations,'wildcard',orderHash1,orderHash2,%label, sig>);
+                    event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, 'wildcard', orderHash1, orderHash2)
+                )
+                else
+                (
+                    let msg = <~serverIP, resolverIP1,~salt, %iterations,'wildcard',orderHash2,orderHash1,%label> in
+                    let sig = sign(msg, ~secKey) in
+                    out(<~serverIP, resolverIP1,~salt, %iterations,'wildcard',orderHash2,orderHash1,%label,sig>);
+                    event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, 'wildcard', orderHash2, orderHash1)
+                )
+
+            )
+        )
+        
+    )
+
+
+let Server(~serverIP,~salt,%iterations:nat, ~ownerName1, ~ownerIP1,
+    ~ownerName2, ~ownerIP2, ~ownerName3, ~ownerIP3, order, %label:nat,
+    ~secKey)=
+  // 
+    let hash1 = IH(~salt, ~ownerName1, %iterations) in
+    let hash2 = IH(~salt, ~ownerName2, %iterations) in
+    let hash3 = IH(~salt, ~ownerName3, %iterations) in
+    event InitiateServer(~serverIP); // for the server initiated
+    event ZoneOrderedRec(hash1, hash2, hash3);
+    //ServerReceive(~serverIP, ~salt,%iterations,hash1,hash2,
+    //            hash3,~ownerIP1,~ownerIP2,~ownerIP3,order, %label:nat)
+    event ServerHasDomainName(~serverIP, ~ownerName1);
+    event ServerHasDomainName(~serverIP, ~ownerName2);
+    event ServerHasDomainName(~serverIP, ~ownerName3);
+    ServerReceive(~serverIP,~salt,%iterations,hash1,hash2,hash3,
+                ~ownerIP1,~ownerIP2,~ownerIP3,order, %label:nat,
+                ~secKey)
+
+
+// NSEC Server - same zone with stale records (missing domainName3)
+// Models transitional state during NSEC-to-NSEC3 migration
+let NSECServer(~serverIP, ~name1, ~name1IP, ~name2, ~name2IP, ~secKey) =
+    !(
+        in(<resolverIP, recServerIP, qName>);
+        if recServerIP = ~serverIP then
+        (
+            if qName = ~name1 then
+            (
+                let msg = <~serverIP, resolverIP, ~name1IP, qName, 'exist'> in
+                let sig = sign(msg, ~secKey) in
+                out(<~serverIP, resolverIP, ~name1IP, qName, 'exist', sig>);
+                event NSECQueryExist(~serverIP, resolverIP, qName)
+            )
+            else if qName = ~name2 then
+            (
+                let msg = <~serverIP, resolverIP, ~name2IP, qName, 'exist'> in
+                let sig = sign(msg, ~secKey) in
+                out(<~serverIP, resolverIP, ~name2IP, qName, 'exist', sig>);
+                event NSECQueryExist(~serverIP, resolverIP, qName)
+            )
+            else
+            (
+                let msg = <~serverIP, resolverIP, 'wildcard', qName, 'nonexist'> in
+                let sig = sign(msg, ~secKey) in
+                out(<~serverIP, resolverIP, 'wildcard', qName, 'nonexist', sig>);
+                event NSECQueryNonExist(~serverIP, resolverIP, qName)
+            )
+        )
+    )
+
+
+// NSEC Resolver - queries NSEC server for same zone
+let NSECResolver(~resolIP, ~serverIP, queryName, pubKey) =
+(
+    event InitiateNSECResolver(~resolIP);
+    out(<~resolIP, ~serverIP, queryName>);
+    in(<recServerIP, recResolverIP, result, qName, status, sig>);
+    let m = <recServerIP, recResolverIP, result, qName, status> in
+    if <recServerIP, recResolverIP, verify(sig, m, pubKey)> = <~serverIP, ~resolIP, true> then
+    (
+        if status = 'exist' then
+            event ResolverGotExist(recResolverIP, queryName)
+        else
+            event ResolverGotNonExist(recResolverIP, queryName)
+    )
+)
+
+
+let Resolver(~resolIP, ~serverIP, queryName,pubKey)=
+(
+    let %label:nat = %1 in
+
+    // for the guardness property
+    event InitiateResolver(~resolIP);
+
+    out(<~resolIP,~serverIP,queryName>);
+    event ResolverSendQuery(~resolIP, queryName);
+
+    in(<recRootIP, recResolverIP,salt,%iterations1:nat,rootResult,proof1,proof2,%recLabel1, sig1>);
+    let m1 = <recRootIP, recResolverIP,salt,%iterations1:nat,rootResult,proof1,proof2,%recLabel1> in
+    if <recRootIP, recResolverIP, verify(sig1,m1,pubKey)> = <~serverIP, ~resolIP,true> then(
+        event ResolverReceiveResult(recResolverIP,rootResult);
+        // for the integrity property
+        event ResolverReceiveResp(recRootIP, recResolverIP,salt,%iterations1:nat,rootResult,proof1,proof2);
+
+        let hashRootQueryName = IH(salt,queryName,%iterations1:nat) in
+        // check if the hash value and label data equal
+        if <hashRootQueryName,%label %+ %1> = <proof1, %recLabel1> then(
+            event ResolverGotExist(recResolverIP,queryName)
+        )
+        else(
+            event ResolverGotNonExist(recResolverIP,queryName)
+        )
+    )
+)
+process:
+// then create the IP and rootIP for the resolver
+new ~resolIP;
+new ~nsecResolIP;
+new ~serverIP;
+new ~nsecServerIP;
+
+let %iterations:nat = %1 in
+new ~salt;
+
+// the IPs for the server
+new ~IP1;
+new ~IP2;
+new ~IP3; 
+
+// create the name of the servers
+new ~domainName1;
+new ~domainName2;
+new ~domainName3;
+// new the queryName
+let queryName = ~domainName3 in
+
+// the following is for the signing function
+// create the secrecy keys and public keys for signing
+new ~secretKey;
+let pubKey = pk(~secretKey) in
+
+// calculate the hash value of the query name and the domain names
+// the hash value of the root server
+// assume the order for them is rootName1Hash < rootName2Hash < rootName3Hash
+let queryHash = IH(~salt,queryName,%iterations) in
+let name1Hash = IH(~salt,~domainName1,%iterations) in
+let name2Hash = IH(~salt,~domainName2,%iterations) in
+let name3Hash = IH(~salt,~domainName3,%iterations) in
+
+let rootOrder = <'false','true','true'> in
+// add the label field
+let %serverLabel:nat = %1 in
+
+Resolver(~resolIP, ~serverIP, queryName,pubKey)
+|| 
+Server(~serverIP, ~salt, %iterations, ~domainName1, ~IP1,
+    ~domainName2, ~IP2, ~domainName3, ~IP3, rootOrder,
+    %serverLabel:nat, ~secretKey)
+||
+// NSEC server for same zone - only has domainName1 and domainName2 (stale)
+NSECServer(~nsecServerIP, ~domainName1, ~IP1, ~domainName2, ~IP2, ~secretKey)
+||
+// NSEC resolver queries for domainName3 which NSEC server doesn't have
+NSECResolver(~nsecResolIP, ~nsecServerIP, queryName, pubKey)
+
+
+// NSEC3 service promise: if name exists in server, resolver gets exist
+lemma servicePromise:
+"
+    All resolIP serverIP queryName #i #j.
+    (ServerHasDomainName(serverIP, queryName) @ #i
+     & ResolverSendQuery(resolIP, queryName) @ #j)
+     ==>
+     (Ex #k. ResolverGotExist(resolIP, queryName) @ #k)
+"
+
+// Property 21: Denial Exclusivity - EXPECTED FALSIFIED
+// NSEC and NSEC3 must agree on name existence for the same zone
+lemma denial_exclusivity:
+"All resolIP1 resolIP2 queryName #i #j.
+    ResolverGotExist(resolIP1, queryName) @ #i &
+    ResolverGotNonExist(resolIP2, queryName) @ #j
+    ==> F"
+
+// Executability: the coexistence attack is reachable
+lemma coexistence_attack_exists:
+    exists-trace
+"Ex resolIP1 resolIP2 queryName #i #j.
+    ResolverGotExist(resolIP1, queryName) @ #i &
+    ResolverGotNonExist(resolIP2, queryName) @ #j"
+
+end

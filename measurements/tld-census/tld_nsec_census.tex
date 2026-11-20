@@ -1,0 +1,34 @@
+\begin{table}[t]
+\centering
+\caption{All 52 TLDs serving NSEC with a root DS and AD-set responses in the September~9, 2026 census. Names use ASCII A-labels. The list records parent-zone observations, not demonstrated compromises.}
+\label{tab:tld_nsec_census}
+\small
+\begin{tabular*}{\columnwidth}{@{\extracolsep{\fill}}lll@{}}
+\toprule
+\multicolumn{3}{c}{\textbf{TLDs with authenticated NSEC responses}} \\
+\midrule
+\texttt{.al} & \texttt{.aquarelle} & \texttt{.arpa} \\
+\texttt{.audio} & \texttt{.auto} & \texttt{.ax} \\
+\texttt{.bd} & \texttt{.br} & \texttt{.bt} \\
+\texttt{.car} & \texttt{.cars} & \texttt{.ch} \\
+\texttt{.christmas} & \texttt{.ci} & \texttt{.cy} \\
+\texttt{.diet} & \texttt{.dz} & \texttt{.ee} \\
+\texttt{.er} & \texttt{.flowers} & \texttt{.game} \\
+\texttt{.gdn} & \texttt{.gn} & \texttt{.gov}$^\dagger$ \\
+\texttt{.guitars} & \texttt{.hosting} & \texttt{.id} \\
+\texttt{.kg} & \texttt{.kz} & \texttt{.lb} \\
+\texttt{.li} & \texttt{.lk} & \texttt{.lol} \\
+\texttt{.lr} & \texttt{.mc} & \texttt{.md} \\
+\texttt{.mom} & \texttt{.nu} & \texttt{.pics} \\
+\texttt{.pr} & \texttt{.ruhr} & \texttt{.se} \\
+\texttt{.tc} & \texttt{.tn} & \texttt{.ve} \\
+\texttt{.xn--54b7fta0cc} & \texttt{.xn--80ao21a} & \texttt{.xn--l1acc} \\
+\texttt{.xn--mgbai9azgqp6j} & \texttt{.xn--mgbayh7gpa} & \texttt{.xn--pgbs0dh} \\
+\texttt{.xn--xkc2al3hye2a} &  &  \\
+\bottomrule
+\end{tabular*}
+\begin{minipage}{\columnwidth}
+\footnotesize
+$^\dagger$\texttt{.gov} serves compact denial (NXNAME/TYPE128), not a covering NSEC range for our probe. The other 51 entries additionally have an authoritative covering-NSEC response, the parent-side prerequisite for P21. \texttt{.xn--fzc2c9e2c} also serves NSEC but has no root DS and is excluded from these 52. Exploitation still requires an attacker-controlled signed child, a suitable target name, and a vulnerable downstream resolver.
+\end{minipage}
+\end{table}

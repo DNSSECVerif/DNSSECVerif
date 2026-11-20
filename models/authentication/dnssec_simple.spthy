@@ -1,0 +1,424 @@
+/*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: dnssec_simple.spthy
+ *
+ * DNSSEC Authentication Model - Simple Version (Single Key per Zone)
+ * Properties 10-14: Data Origin Authentication, Integrity, Chain of Trust
+ *
+ * Uses single signing key per zone for tractability.
+ * For full KSK/ZSK model, see dnssec_full.spthy
+ */
+
+theory DNSSECAuthSimple
+begin
+
+builtins: signing, hashing
+
+/*============================================================================
+ * SECTION 1: Function Declarations
+ *============================================================================*/
+
+functions:
+    // RRset constructor: <owner_name, rrtype, rdata>
+    rrset/3,
+
+    // Projection functions
+    get_owner/1, get_type/1, get_data/1
+
+equations:
+    get_owner(rrset(o,t,d)) = o,
+    get_type(rrset(o,t,d)) = t,
+    get_data(rrset(o,t,d)) = d
+
+
+/*============================================================================
+ * SECTION 2: Complete Zone Hierarchy Setup
+ *
+ * All three zones are set up atomically to establish the chain of trust.
+ * This models the pre-deployment configuration of DNSSEC.
+ *============================================================================*/
+
+rule ZoneHierarchySetup:
+    [ Fr(~skRoot), Fr(~skTLD), Fr(~skSLD) ]
+  --[
+      // Zone initialization
+      TrustAnchorCreated(pk(~skRoot))
+    , ZoneInitialized('root', pk(~skRoot))
+    , ZoneInitialized('tld', pk(~skTLD))
+    , ZoneInitialized('sld', pk(~skSLD))
+
+      // DS record creation (chain links)
+    , RootCreatesDS('tld', h(pk(~skTLD)))
+    , TLDCreatesDS('sld', h(pk(~skSLD)))
+
+      // Track zone ownership of DS records
+    , ZoneOwns('root', <'DS', 'tld', h(pk(~skTLD))>)
+    , ZoneOwns('tld', <'DS', 'sld', h(pk(~skSLD))>)
+    ]->
+    [ // Trust anchor (resolver knows root's public key)
+      !TrustAnchor(pk(~skRoot))
+
+      // Zone secret keys (for signing)
+    , !ZoneKey('root', ~skRoot)
+    , !ZoneKey('tld', ~skTLD)
+    , !ZoneKey('sld', ~skSLD)
+
+      // DS records (persistent, signed by parent)
+    , !DS('root', 'tld', h(pk(~skTLD)), sign(<'DS', 'tld', h(pk(~skTLD))>, ~skRoot))
+    , !DS('tld', 'sld', h(pk(~skSLD)), sign(<'DS', 'sld', h(pk(~skSLD))>, ~skTLD))
+
+      // Public keys available to network
+    , Out(pk(~skRoot))
+    , Out(pk(~skTLD))
+    , Out(pk(~skSLD))
+    ]
+
+
+/*============================================================================
+ * SECTION 3: Authoritative Nameserver Responses
+ *
+ * Zones publish their DS records, DNSKEYs, and RRsets.
+ *============================================================================*/
+
+// Root publishes DS for TLD
+rule RootPublishDS:
+    [ !DS('root', 'tld', digest, sig) ]
+  -->
+    [ Out(<'DS', 'tld', digest, sig>) ]
+
+
+// TLD publishes DS for SLD
+rule TLDPublishDS:
+    [ !DS('tld', 'sld', digest, sig) ]
+  -->
+    [ Out(<'DS', 'sld', digest, sig>) ]
+
+
+// Zone publishes its DNSKEY (self-signed for simplicity)
+rule ZonePublishDNSKEY:
+    [ !ZoneKey(zone, sk) ]
+  --[
+      ZoneOwns(zone, <'DNSKEY', zone, pk(sk)>)
+    , ZoneIssuesSig(zone, <'DNSKEY', zone, pk(sk)>, sign(<'DNSKEY', zone, pk(sk)>, sk))
+    ]->
+    [ Out(<'DNSKEY', zone, pk(sk), sign(<'DNSKEY', zone, pk(sk)>, sk)>) ]
+
+
+// SLD creates and signs an RRset (e.g., A record)
+rule SLDSignRRset:
+    [ !ZoneKey('sld', skSLD)
+    , Fr(~rdata)
+    ]
+  --[
+      ZoneOwns('sld', rrset('www.sld', 'A', ~rdata))
+    , ZoneIssuesSig('sld', rrset('www.sld', 'A', ~rdata), sign(rrset('www.sld', 'A', ~rdata), skSLD))
+    , ServerSendRRset('sld', rrset('www.sld', 'A', ~rdata))
+    ]->
+    [ Out(<rrset('www.sld', 'A', ~rdata), sign(rrset('www.sld', 'A', ~rdata), skSLD)>) ]
+
+
+/*============================================================================
+ * SECTION 4: Resolver - Step-by-Step Chain of Trust Verification
+ *
+ * The resolver validates the chain from trust anchor to target zone
+ * using sequential verification steps (Algorithm 1 from the paper).
+ *
+ * Step 1: Verify DS for TLD (signed by root, via trust anchor)
+ * Step 2: Verify TLD's DNSKEY (hash matches DS, self-signed)
+ * Step 3: Verify DS for SLD (signed by TLD)
+ * Step 4: Verify SLD's DNSKEY (hash matches DS, self-signed)
+ * Step 5: Verify target RRset (signed by SLD) and accept
+ *
+ * State transitions:
+ *   ResolverStart -> VerifiedTLD_DS -> VerifiedTLD_Key ->
+ *   VerifiedSLD_DS -> VerifiedSLD_Key -> ResolverAccepted
+ *============================================================================*/
+
+// Step 0: Resolver initiates chain verification with a query
+rule Resolver_Start:
+    [ !TrustAnchor(pkRoot)
+    , Fr(~qid)  // Query identifier for session tracking
+    ]
+  --[ ResolverStartsQuery(~qid, pkRoot) ]->
+    [ ResolverState(~qid, 'start', pkRoot, 'none', 'none') ]
+
+
+// Step 1: Verify DS for TLD (root zone signed it)
+rule Resolver_VerifyDS_TLD:
+    [ ResolverState(qid, 'start', pkRoot, x, y)
+    , In(<'DS', 'tld', digest_tld, sig_ds_tld>)
+    ]
+  --[
+      Eq(verify(sig_ds_tld, <'DS', 'tld', digest_tld>, pkRoot), true)
+    , ChainStep('root', 'tld', digest_tld)
+    , VerifiedDS('root', 'tld', digest_tld)
+    ]->
+    [ ResolverState(qid, 'verified_tld_ds', pkRoot, digest_tld, 'none') ]
+
+
+// Step 2: Verify TLD's DNSKEY (hash matches DS, key is self-signed)
+rule Resolver_VerifyDNSKEY_TLD:
+    [ ResolverState(qid, 'verified_tld_ds', pkRoot, digest_tld, x)
+    , In(<'DNSKEY', 'tld', pkTLD, sig_tld_key>)
+    ]
+  --[
+      // Hash of DNSKEY must match the DS digest
+      Eq(digest_tld, h(pkTLD))
+      // DNSKEY is self-signed (simplified model)
+    , Eq(verify(sig_tld_key, <'DNSKEY', 'tld', pkTLD>, pkTLD), true)
+    , VerifiedDNSKEY('tld', pkTLD)
+    ]->
+    [ ResolverState(qid, 'verified_tld_key', pkRoot, pkTLD, 'none') ]
+
+
+// Step 3: Verify DS for SLD (TLD zone signed it)
+rule Resolver_VerifyDS_SLD:
+    [ ResolverState(qid, 'verified_tld_key', pkRoot, pkTLD, x)
+    , In(<'DS', 'sld', digest_sld, sig_ds_sld>)
+    ]
+  --[
+      Eq(verify(sig_ds_sld, <'DS', 'sld', digest_sld>, pkTLD), true)
+    , ChainStep('tld', 'sld', digest_sld)
+    , VerifiedDS('tld', 'sld', digest_sld)
+    ]->
+    [ ResolverState(qid, 'verified_sld_ds', pkRoot, pkTLD, digest_sld) ]
+
+
+// Step 4: Verify SLD's DNSKEY (hash matches DS, key is self-signed)
+rule Resolver_VerifyDNSKEY_SLD:
+    [ ResolverState(qid, 'verified_sld_ds', pkRoot, pkTLD, digest_sld)
+    , In(<'DNSKEY', 'sld', pkSLD, sig_sld_key>)
+    ]
+  --[
+      // Hash of DNSKEY must match the DS digest
+      Eq(digest_sld, h(pkSLD))
+      // DNSKEY is self-signed
+    , Eq(verify(sig_sld_key, <'DNSKEY', 'sld', pkSLD>, pkSLD), true)
+    , VerifiedDNSKEY('sld', pkSLD)
+    , ChainVerified('root', 'sld')
+    ]->
+    [ ResolverState(qid, 'verified_sld_key', pkRoot, pkTLD, pkSLD) ]
+
+
+// Step 5: Verify target RRset and accept
+rule Resolver_AcceptRRset:
+    let
+        target_rr = rrset(owner, rtype, rdata)
+    in
+    [ ResolverState(qid, 'verified_sld_key', pkRoot, pkTLD, pkSLD)
+    , In(<target_rr, sig_rr>)
+    ]
+  --[
+      Eq(verify(sig_rr, target_rr, pkSLD), true)
+    , ResolverAccepts(target_rr, sig_rr)
+    , QueryCompleted(qid)
+    ]->
+    [ ResolverAcceptedRR(target_rr, sig_rr) ]
+
+
+/*============================================================================
+ * SECTION 5: Adversary Capabilities
+ *============================================================================*/
+
+rule AdversaryCreateZone:
+    [ Fr(~skAdv) ]
+  --[ AdversaryKey(pk(~skAdv)) ]->
+    [ Out(~skAdv), Out(pk(~skAdv)) ]
+
+
+/*============================================================================
+ * SECTION 6: Restrictions
+ *============================================================================*/
+
+restriction Equality:
+    "All x y #i. Eq(x, y) @ #i ==> x = y"
+
+
+/*============================================================================
+ * SECTION 8: Security Properties (Lemmas)
+ *
+ * Property 10: Data Origin Authentication
+ * Property 11: Comprehensive Record Validation
+ * Property 12: Integrity Preservation
+ * Property 14: Chain Integrity
+ *============================================================================*/
+
+/*---------------------------------------------------------------------------
+ * Sanity Checks (Executability)
+ *---------------------------------------------------------------------------*/
+
+lemma sanity_trust_anchor_created:
+    exists-trace
+    "Ex pk #i. TrustAnchorCreated(pk) @ #i"
+
+lemma sanity_chain_verified:
+    exists-trace
+    "Ex #i. ChainVerified('root', 'sld') @ #i"
+
+lemma sanity_resolver_accepts:
+    exists-trace
+    "Ex rr sig #i. ResolverAccepts(rr, sig) @ #i"
+
+// Sanity: full step-by-step chain verification is executable
+lemma sanity_full_chain_steps:
+    exists-trace
+    "Ex qid pk rr sig #start #chain #accept.
+        ResolverStartsQuery(qid, pk) @ #start
+        & ChainVerified('root', 'sld') @ #chain
+        & ResolverAccepts(rr, sig) @ #accept
+        & #start < #chain
+        & #chain < #accept"
+
+
+/*---------------------------------------------------------------------------
+ * PROPERTY 10: Data Origin Authentication
+ *
+ * Any RRset accepted by the resolver must have been created and signed
+ * by its authoritative zone owner.
+ *
+ * ∀D: Accepted(D) ⟹ ∃Z: Owns(Z,D) ∧ IssuedSig(Z,D,σ)
+ *---------------------------------------------------------------------------*/
+
+lemma property11_data_origin_authentication [reuse]:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex zone #j #k.
+            ZoneOwns(zone, rr) @ #j
+            & ZoneIssuesSig(zone, rr, sig) @ #k
+            & #j < #i
+            & #k < #i)"
+
+// Stronger: the zone that owns it is the one that signed it
+lemma property11_owner_is_signer [reuse]:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex zone #j #k.
+            ZoneOwns(zone, rr) @ #j
+            & ZoneIssuesSig(zone, rr, sig) @ #k)"
+
+
+/*---------------------------------------------------------------------------
+ * PROPERTY 11: Comprehensive Record Validation
+ *
+ * Every RRset sent by a zone has a valid signature.
+ * (This is a zone-side property, verified by construction)
+ *
+ * ∀D ∈ RR(Z): ∃σ,K: Verify(K, RRData(D), σ) = true
+ *---------------------------------------------------------------------------*/
+
+// Every RRset sent by a server has an accompanying signature
+lemma property11_all_rrsets_signed:
+    "All zone rr #i.
+        ServerSendRRset(zone, rr) @ #i
+        ==>
+        (Ex sig #j.
+            ZoneIssuesSig(zone, rr, sig) @ #j)"
+
+
+/*---------------------------------------------------------------------------
+ * PROPERTY 12: Integrity Preservation
+ *
+ * This property is implicit in the signing builtin:
+ * verify(sign(m, k), m', pk(k)) = true only if m = m'
+ *
+ * We verify this by showing an adversary cannot produce a valid
+ * signature for modified data without the private key.
+ *---------------------------------------------------------------------------*/
+
+// Adversary cannot forge signature for data they didn't create
+lemma property11_no_forgery:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex zone #j.
+            ZoneIssuesSig(zone, rr, sig) @ #j)"
+
+
+/*---------------------------------------------------------------------------
+ * PROPERTY 14: Chain of Trust Integrity (Step-by-Step Verification)
+ *
+ * The resolver only accepts RRsets after verifying the complete chain
+ * from the trust anchor to the target zone in sequential steps.
+ *
+ * ∀i: Hash(DNSKEY_{i+1}) = DS_i ∧ TrustAnchor(DS_0)
+ *---------------------------------------------------------------------------*/
+
+// Chain verification MUST occur BEFORE acceptance (temporal ordering)
+lemma property12_chain_before_acceptance:
+    "All rr sig #accept.
+        ResolverAccepts(rr, sig) @ #accept
+        ==>
+        (Ex #chain. ChainVerified('root', 'sld') @ #chain & #chain < #accept)"
+
+// Each chain step is properly ordered: root->tld BEFORE tld->sld
+lemma property12_chain_steps_ordered:
+    "All rr sig #accept.
+        ResolverAccepts(rr, sig) @ #accept
+        ==>
+        (Ex h_tld h_sld #step1 #step2.
+            ChainStep('root', 'tld', h_tld) @ #step1
+            & ChainStep('tld', 'sld', h_sld) @ #step2
+            & #step1 < #step2
+            & #step2 < #accept)"
+
+// DS verification precedes DNSKEY verification for each zone
+lemma property12_ds_before_dnskey:
+    "All zone pk #key.
+        VerifiedDNSKEY(zone, pk) @ #key
+        ==>
+        (Ex parent digest #ds.
+            VerifiedDS(parent, zone, digest) @ #ds
+            & #ds < #key)"
+
+// Accepted RRsets are signed by legitimate zones
+lemma property12_no_adversary_signature:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex zone #j.
+            ZoneIssuesSig(zone, rr, sig) @ #j
+            & not(Ex advKey #a. AdversaryKey(advKey) @ #a
+                  & zone = 'adversary'))"
+
+// Trust anchor is required and precedes all verification
+lemma property12_trust_anchor_required:
+    "All rr sig #accept.
+        ResolverAccepts(rr, sig) @ #accept
+        ==>
+        (Ex pk #ta.
+            TrustAnchorCreated(pk) @ #ta
+            & #ta < #accept)"
+
+// Query starts before acceptance
+lemma property12_query_lifecycle:
+    "All rr sig #accept.
+        ResolverAccepts(rr, sig) @ #accept
+        ==>
+        (Ex qid pk #start.
+            ResolverStartsQuery(qid, pk) @ #start
+            & #start < #accept)"
+
+
+/*---------------------------------------------------------------------------
+ * Combined Property: Full DNSSEC Security
+ *
+ * Combines all authentication guarantees.
+ *---------------------------------------------------------------------------*/
+
+lemma full_dnssec_security:
+    "All rr sig #accept.
+        ResolverAccepts(rr, sig) @ #accept
+        ==>
+        // Property 10: Origin authentication
+        (Ex zone #own #sign.
+            ZoneOwns(zone, rr) @ #own
+            & ZoneIssuesSig(zone, rr, sig) @ #sign
+            & #own < #accept
+            & #sign < #accept)
+        // Property 14: Chain verified BEFORE acceptance (temporal ordering)
+        & (Ex #chain. ChainVerified('root', 'sld') @ #chain & #chain < #accept)"
+
+
+end

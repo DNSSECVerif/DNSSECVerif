@@ -1,0 +1,406 @@
+/*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: nsec3.spthy
+ *
+ * NSEC3 denial-of-existence protocol model (SAPIC+/Tamarin)
+ * Properties 18-20: NSEC3 Executability, Domain Secrecy, Result Authentication
+ */
+
+
+ theory NSEC3_sapicplus_nonat
+ begin
+
+builtins: hashing, natural-numbers, signing
+functions: h/1, IH/3, GetOrder1/1, GetOrder2/1, GetOrder3/1, sign/2, verify/3, pk/1 // return Order(x1,x2), if x1<x2, true, else , false
+equations: 
+//IH(salt,x,%0) = h(<x,salt>),
+IH(salt,x,%1) = h(<h(<x, salt>),salt>),
+// get order is for comparasion in the server
+GetOrder1(<z1,z2,z3>) = z1,
+GetOrder2(<z1,z2,z3>) = z2,
+GetOrder3(<z1,z2,z3>) = z3
+
+
+
+let ServerReceive(~serverIP,~salt,%iterations:nat,orderHash1, orderHash2, orderHash3,
+    ~ownerIP1, ~ownerIP2, ~ownerIP3, order, %label:nat, ~secKey) =
+    !(
+
+        // the label number is for wildcard reponse
+        // if the query exists, the label number will be label+1
+        let %existLabel:nat = %label %+ %1 in
+        // out(<resolverIP, rootIP, rootQueryName>);
+        in(<resolverIP1,recServerIP, queryName>);
+        if recServerIP = ~serverIP then
+        (
+            let hashQueryName = IH(~salt,queryName,%iterations) in
+            if hashQueryName = orderHash1 then
+            (
+                let msg = <~serverIP, resolverIP1, ~salt, %iterations,~ownerIP1, orderHash1, orderHash1, %existLabel> in
+                let sig = sign(msg, ~secKey) in
+                out(<~serverIP, resolverIP1, ~salt, %iterations,~ownerIP1, orderHash1, orderHash1, %existLabel, sig>);
+                event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP1, orderHash1, orderHash1);
+                event ResolverKnowDomainName(resolverIP1, queryName)
+            )
+            else if hashQueryName = orderHash2 then
+            (
+                let msg = <~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP2, orderHash2, orderHash2, %existLabel> in
+                let sig = sign(msg, ~secKey) in
+                out(<~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP2, orderHash2, orderHash2, %existLabel, sig>);
+                event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP2, orderHash2, orderHash2);
+                event ResolverKnowDomainName(resolverIP1, queryName)
+            )
+            else if hashQueryName = orderHash3 then
+            (
+                let msg = <~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP3, orderHash3, orderHash3, %existLabel> in
+                let sig = sign(msg, ~secKey) in
+                out(<~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP3, orderHash3, orderHash3, %existLabel, sig>);
+                event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, ~ownerIP3, orderHash3, orderHash3);
+                event ResolverKnowDomainName(resolverIP1, queryName)
+            )
+            else
+            (
+                event QueryNameNonExist(~serverIP, resolverIP1, queryName);
+                // find the closest one
+                // get the greater than and less than relation of the query name and the owner names
+                let order1 = GetOrder1(order) in
+                let order2 = GetOrder2(order) in
+                let order3 = GetOrder3(order) in
+                if order1='true' then
+                (
+                    new ~plainName;
+                    let msg = <~serverIP, resolverIP1,~salt, %iterations,'wildcard',~plainName,orderHash1,%label> in
+                    let sig = sign(msg, ~secKey) in
+                    out(<~serverIP, resolverIP1,~salt, %iterations,'wildcard',~plainName,orderHash1,%label, sig>);
+                    event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, 'wildcard', ~plainName, orderHash1)
+                )
+                else if order2='true' then
+                (
+                    let msg = <~serverIP, resolverIP1,~salt, %iterations,'wildcard',orderHash1,orderHash2,%label> in
+                    let sig = sign(msg, ~secKey) in
+                    out(<~serverIP, resolverIP1,~salt, %iterations,'wildcard',orderHash1,orderHash2,%label, sig>);
+                    event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, 'wildcard', orderHash1, orderHash2)
+                )
+                else if order3='true' then
+                (
+                    let msg = <~serverIP, resolverIP1,~salt, %iterations,'wildcard',orderHash2,orderHash3,%label> in
+                    let sig = sign(msg, ~secKey) in
+                    out(<~serverIP, resolverIP1,~salt, %iterations,'wildcard',orderHash2,orderHash3,%label,sig>);
+                    event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, 'wildcard', orderHash2, orderHash3)
+                )
+                else
+                (
+                    let msg = <~serverIP, resolverIP1,~salt, %iterations,'wildcard',orderHash3,orderHash1,%label> in
+                    let sig = sign(msg, ~secKey) in
+                    out(<~serverIP, resolverIP1,~salt, %iterations,'wildcard',orderHash3,orderHash1,%label,sig>);
+                    event ServerSendResp(~serverIP, resolverIP1, ~salt, %iterations, 'wildcard', orderHash3, orderHash1)
+                )
+
+            )
+        )
+        
+    )
+
+
+
+let Server(~serverIP,~salt,%iterations:nat, ~ownerName1, ~ownerIP1,
+    ~ownerName2, ~ownerIP2, ~ownerName3, ~ownerIP3, order, %label:nat,
+    ~secKey)=
+  // 
+    let hash1 = IH(~salt, ~ownerName1, %iterations) in
+    let hash2 = IH(~salt, ~ownerName2, %iterations) in
+    let hash3 = IH(~salt, ~ownerName3, %iterations) in
+    event InitiateServer(~serverIP); // for the server initiated
+    event ZoneOrderedRec(hash1, hash2, hash3);
+    //ServerReceive(~serverIP, ~salt,%iterations,hash1,hash2,
+    //            hash3,~ownerIP1,~ownerIP2,~ownerIP3,order, %label:nat)
+    event ServerHasDomainName(~serverIP, ~ownerName1);
+    event ServerHasDomainName(~serverIP, ~ownerName2);
+    event ServerHasDomainName(~serverIP, ~ownerName3);
+    ServerReceive(~serverIP,~salt,%iterations,hash1,hash2,hash3,
+                ~ownerIP1,~ownerIP2,~ownerIP3,order, %label:nat,
+                ~secKey)
+    
+
+
+
+// the resolver process
+// the input is resolverIP and rootIP and three-layer query name
+let Resolver(~resolIP, ~rootIP, ~rootQueryName, ~tldQueryName, ~sldQueryName,
+    pubKey1, pubKey2, pubKey3) = 
+    (
+        //new ~queryName;
+        //in(<zoneID,queryName>);
+        let %rootLabelR:nat = %1 in
+        let %tldLabelR:nat = %rootLabelR %+ %1 in
+        let %sldLabelR:nat = %tldLabelR %+ %1 in
+
+        // for the guardness property
+        event InitiateResolver(~resolIP);
+
+        out(<~resolIP, ~rootIP, ~rootQueryName>);
+        event ResolverSendQuery(~resolIP, ~rootQueryName);
+
+        in(<recRootIP, recResolverIP,salt,%iterations1:nat,rootResult,proof1,proof2,%recLabel1, sig1>);
+        let m1 = <recRootIP, recResolverIP,salt,%iterations1:nat,rootResult,proof1,proof2,%recLabel1> in
+        // check if the receiving and sending sides are corret
+        if <recRootIP, recResolverIP, verify(sig1,m1,pubKey1)> = <~rootIP, ~resolIP,true> then(
+            event ResolverReceiveResult(recResolverIP,rootResult);
+            // for the integrity property
+            event ResolverReceiveResp(recRootIP, recResolverIP,salt,%iterations1:nat,rootResult,proof1,proof2);
+
+            let hashRootQueryName = IH(salt,~rootQueryName,%iterations1:nat) in
+            // check if the hash value and label data equal
+            if <hashRootQueryName,%rootLabelR %+ %1> = <proof1, %recLabel1> then
+            (
+                // the resolver get the rootresult, which is the ip of the next level server
+                event ResolverGotExist(~resolIP,~rootQueryName,rootResult);
+                let TLDIP = rootResult in
+                // send the query to TLD server
+                out(<~resolIP, TLDIP, ~tldQueryName>);
+                event ResolverSendQuery(~resolIP, ~tldQueryName);
+
+                //receive the anser from the TLD server
+                in(<recTLDIP, recResolverIP2, salt2, %iterations2:nat, tldResult, 
+                    proof3, proof4, %recLabel2, sig2>);
+                let m2 = <recTLDIP, recResolverIP2, salt2, %iterations2:nat, tldResult, 
+                proof3, proof4, %recLabel2> in
+
+                if <recTLDIP, recResolverIP2, verify(sig2,m2,pubKey2)> = <TLDIP, ~resolIP, true> then
+                (
+                    // for the integrity property
+                    event ResolverReceiveResp(recTLDIP, recResolverIP2, salt2, %iterations2:nat, tldResult, 
+                        proof3, proof4);
+                
+                    let hashTLDQueryName = IH(salt2,~tldQueryName,%iterations2:nat) in
+                    //let order2 = GetOrder(hashTLDQueryName, proof3, tldOrder) in
+                    if <hashTLDQueryName, %tldLabelR %+ %1> = <proof3, %recLabel2> then
+                    (
+                        // the resolver get the TLDResult, which is the ip of the next level server
+                        event ResolverGotExist(~resolIP, ~tldQueryName, tldResult);
+                        let SLDIP = tldResult in
+                        // send the query to SLD server
+                        out(<~resolIP, SLDIP, ~sldQueryName>);
+                        event ResolverSendQuery(~resolIP, ~sldQueryName);
+
+                        // receive the answer from the SLD server
+                        in(<recSLDIP, recResolverIP3, salt3, %iterations3:nat, sldResult, 
+                            proof5, proof6, %recLabel3, sig3>);
+
+                        let m3 = <recSLDIP, recResolverIP3, salt3, %iterations3:nat, sldResult, 
+                        proof5, proof6, %recLabel3> in
+
+                        
+                        if <recSLDIP, recResolverIP3,verify(sig3,m3, pubKey3)> = <SLDIP, ~resolIP, true> then
+                        (
+                            // for the integrity property
+                            event ResolverReceiveResp(recSLDIP, recResolverIP3, salt3, %iterations3:nat, sldResult, 
+                                proof5, proof6);
+
+                            let hashSLDQueryName = IH(salt3,~sldQueryName,%iterations3:nat) in
+                            //let order3 = GetOrder(hashSLDQueryName, proof5, sldOrder) in
+                            if <hashSLDQueryName, %sldLabelR %+ %1> = <proof5, %recLabel3> then
+                            (
+                                // the resolver get the SLDResult, which is the ip of the next level server
+                                event ResolverGotExist(~resolIP, ~sldQueryName, sldResult)
+                            )
+                            else
+                            (
+                                if <sldResult, %recLabel3> = <'wildcard', %sldLabelR> then
+                                    event ResolverGotNonExist(~resolIP, ~sldQueryName)
+                            )
+                        )
+                    )
+                    else
+                    (
+                        if <tldResult, %recLabel2> = <'wildcard', %tldLabelR> then
+                            event ResolverGotNonExist(~resolIP, ~tldQueryName)
+                    )
+                )
+            )
+            else
+            (
+                if <rootResult, %recLabel1> = <'wildcard', %rootLabelR> then
+                    event ResolverGotNonExist(~resolIP, ~rootQueryName)
+            )
+        )
+    )
+
+
+
+process:
+// then create the IP and rootIP for the resolver
+// new the queryName
+new ~queryName1;
+new ~queryName2;
+new ~queryName3;
+new ~resolIP;
+new ~rootIP;
+
+let %iterations:nat = %1 in
+new ~salt1; 
+new ~salt2;
+new ~salt3;
+
+// create the ip addresses of records in the servers
+new ~rootIP1; 
+new ~rootIP2;
+new ~rootIP3; 
+new ~tldIP1; 
+new ~tldIP2;
+new ~tldIP3;
+new ~sldIP1;
+new ~sldIP2;
+new ~sldIP3;
+
+// create the name of the servers
+new ~rootName1;
+new ~rootName2;
+new ~rootName3;
+new ~tldName1;
+new ~tldName2;
+new ~tldName3;
+new ~sldName1;
+new ~sldName2;
+new ~sldName3;
+
+// the following is for the signing function
+// create the secrecy keys and public keys for signing
+new ~secretKey1;
+let pubKey1 = pk(~secretKey1) in
+new ~secretKey2;
+let pubKey2 = pk(~secretKey2) in
+new ~secretKey3;
+let pubKey3 = pk(~secretKey3) in
+
+
+// calculate the hash value of the query name and the domain names
+// the hash value of the root server
+// assume the order for them is rootName1Hash < rootName2Hash < rootName3Hash
+let rootQueryHash = IH(~salt1,~queryName1,%iterations) in
+let rootName1Hash = IH(~salt1,~rootName1,%iterations) in
+let rootName2Hash = IH(~salt1,~rootName2,%iterations) in
+let rootName3Hash = IH(~salt1,~rootName3,%iterations) in
+// let Order(rootName1Hash, rootQueryHash) = 'true' in
+// let Order(rootQueryHash, rootName1Hash) = 'false' in
+// let Order(rootQueryHash, rootName2Hash) = 'true' in
+// let Order(rootQueryHash, rootName3Hash) = 'true' in
+// it the order if rootQueryHash < rootName1Hash
+// let rootOrder = <rootQueryHash, <rootName1Hash, rootName2Hash, rootName3Hash>, 
+//                 <'false','true','true'>> in
+let rootOrder = <'false','true','true'> in
+
+// the hash valus of the tld server
+let tldQueryHash = IH(~salt2,~queryName2,%iterations) in
+let tldName1Hash = IH(~salt2,~tldName1,%iterations) in
+let tldName2Hash = IH(~salt2,~tldName2,%iterations) in
+let tldName3Hash = IH(~salt2,~tldName3,%iterations) in
+// let Order(tldName1Hash, tldQueryHash) = 'true' in
+// let Order(tldQueryHash, tldName1Hash) = 'false' in
+// let Order(tldQueryHash, tldName2Hash) = 'true' in
+// let Order(tldQueryHash, tldName3Hash) = 'true' in
+// let tldOrder = <tldQueryHash, <tldName1Hash, tldName2Hash, tldName3Hash>, 
+//                 <'false','true','true'>> in
+let tldOrder = <'false','true','true'> in
+
+// the hash values of the sld server
+let sldQueryHash = IH(~salt3,~queryName3,%iterations) in
+let sldName1Hash = IH(~salt3,~sldName1,%iterations) in
+let sldName2Hash = IH(~salt3,~sldName2,%iterations) in
+let sldName3Hash = IH(~salt3,~sldName3,%iterations) in
+// let Order(sldName1Hash, sldQueryHash) = 'true' in
+// let Order(sldQueryHash, sldName1Hash) = 'false' in
+// let Order(sldQueryHash, sldName2Hash) = 'true' in
+// let Order(sldQueryHash, sldName3Hash) = 'true' in
+// let sldOrder = <sldQueryHash, <sldName1Hash, sldName2Hash, sldName3Hash>, 
+//                 <'false','true','true'>> in
+let sldOrder = <'false','true','true'> in
+
+// add the label field
+let %rootLabel:nat = %1 in
+let %tldLabel:nat = %rootLabel %+ %1 in
+let %sldLabel:nat = %tldLabel %+ %1 in
+
+Resolver(~resolIP, ~rootIP, ~queryName1, ~queryName2, ~queryName3,
+    pubKey1, pubKey2, pubKey3) 
+||
+Server(~rootIP,~salt1,%iterations, ~rootName1, ~rootIP1,
+    ~rootName2, ~rootIP2, ~rootName3, ~rootIP3, 
+    rootOrder, %rootLabel:nat, ~secretKey1) // the root server
+||
+Server(~rootIP1,~salt2,%iterations, ~tldName1, ~tldIP1,
+    ~tldName2, ~tldIP2, ~tldName3, ~tldIP3,
+    tldOrder, %tldLabel:nat, ~secretKey2) // the first layer server
+||
+Server(~tldIP1,~salt3,%iterations, ~sldName1, ~sldIP1,
+    ~sldName2, ~sldIP2, ~sldName3, ~sldIP3,
+    sldOrder, %sldLabel:nat, ~secretKey3) // the second layer server
+
+
+// Property 18: Executability
+// The protocol successfully produces valid NSEC3 denial-of-existence responses
+lemma ExistExecutability:
+exists-trace
+"
+Ex resolverIP rootQueryName rootResult #i1 #i2.
+ResolverSendQuery(resolverIP, rootQueryName) @ #i1
+&
+ResolverGotExist(resolverIP,rootQueryName,rootResult) @ #i2
+"
+
+// Property 18b: Non-Existence Executability
+lemma NonExistExecutability:
+exists-trace
+"
+Ex resolverIP rootQueryName #i1 #i2.
+ResolverSendQuery(resolverIP, rootQueryName) @ #i1
+&
+ResolverGotNonExist(resolverIP, rootQueryName) @ #i2
+"
+
+// start the guardness property
+// the resolver is identified by resolver IP
+lemma distinctResolver:
+"
+    All resolIP #i1 #i2.
+    InitiateResolver(resolIP) @ #i1 & InitiateResolver(resolIP) @ #i2 
+    ==> 
+    #i1 = #i2
+"
+
+// the server is identified by server IP
+lemma distinctServer:
+"
+    All serverIP #i1 #i2.
+    InitiateServer(serverIP) @ #i1 & InitiateServer(serverIP) @ #i2
+    ==> 
+    #i1 = #i2
+"
+
+// Property 20: Result Authentication
+// NSEC3 denial responses are cryptographically authenticated
+lemma wholeIntegrity:
+"
+All serverIP resolverIP salt iterations result proof1 proof2 #i2.
+    ResolverReceiveResp(serverIP, resolverIP, salt, iterations, result, proof1, proof2) @ #i2
+    ==>
+    (
+    Ex #i1.
+    ServerSendResp(serverIP, resolverIP, salt, iterations, result, proof1, proof2) @ #i1
+    &
+    #i1 < #i2
+    )
+"
+
+// Property 19: Domain Secrecy
+// Domain names remain secret unless explicitly queried; NSEC3 hashing prevents zone enumeration
+lemma domainNameSecrecy:
+"
+    All serverIP domainName #i.
+    ServerHasDomainName(serverIP, domainName) @ #i
+    ==>
+    (not (Ex #j1. K(domainName) @ #j1)) |
+        (Ex #j2 resolverIP. ResolverKnowDomainName(resolverIP, domainName) @ #j2)
+"
+
+end

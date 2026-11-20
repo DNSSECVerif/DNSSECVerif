@@ -1,0 +1,282 @@
+/*
+ *  Model Name: rrsig_underflow_vulnerable.spthy
+ *
+ *  Minimal model for RRSIG Labels underflow attack.
+ *  This version avoids natural-numbers builtin to ensure ProVerif compatibility.
+ *
+ *  Attack summary:
+ *    - Attacker controls attacker.test. zone
+ *    - Attacker sends A record for www.attacker.test. with Labels=1 (underflow)
+ *    - Resolver computes wildcard_base = *.test. (cross-zone!)
+ *    - Resolver caches under *.test.
+ *    - RFC 8198 synthesis answers queries for nope.test. using this entry
+ *    - AD=1 answer signed by attacker.test. for name NOT in attacker.test.
+ */
+
+theory rrsig_underflow_vulnerable
+begin
+
+builtins: hashing, signing
+
+functions:
+    star/1    // star(z) = *.z (wildcard name at zone z)
+
+// =============================================================================
+// Section 1. Restrictions
+// =============================================================================
+
+// Condition (6) check: signer must be authoritative for owner
+restriction Cond6_implies_bailiwick:
+    "All owner signer #i. Cond6_OK(owner, signer) @ i
+     ==> (Ex #j. InBailiwick(owner, signer) @ j & j < i)"
+
+
+// =============================================================================
+// Section 2. Init + Processes
+// =============================================================================
+
+// Ground InBailiwick facts.
+// Critical: 'nope_test' is NOT in-bailiwick for 'attacker_test'.
+let InitBailiwick =
+    event InBailiwick('test', 'test');
+    event InBailiwick('attacker_test', 'test');
+    event InBailiwick('attacker_test', 'attacker_test');
+    event InBailiwick('www_attacker_test', 'test');
+    event InBailiwick('www_attacker_test', 'attacker_test');
+    event InBailiwick('nope_test', 'test');
+    // NOTE: InBailiwick('nope_test', 'attacker_test') is ABSENT
+    0
+
+
+// Honest test. zone NSEC server (Q2 payload)
+// Wire format: <rr_type, owner, rdata, signer, labels_field, sig>
+let HonestTestServer(sk_test) =
+    let nsec_owner = 'attacker_test' in
+    let nsec_next  = 'bystander_test' in
+    let labels_field = 'L2' in  // owner has 2 labels, no wildcard
+    let msg = <'NSEC', nsec_owner, nsec_next, 'test'> in
+    let sig = sign(msg, sk_test) in
+    event HonestServer_Sending(nsec_owner, nsec_next);
+    out(<'NSEC', nsec_owner, nsec_next, 'test', labels_field, sig>)
+
+
+// Resolver: validate and cache
+// BROKEN VERSION: condition (4b) is missing
+let Resolver(~r_id, pk_test, pk_attacker_test) =
+    !(
+        in(<rr_type, owner, rdata, signer, labels_field, sig>);
+        event Resolver_Received(rr_type, owner, signer);
+
+        let msg = <rr_type, owner, rdata, signer> in
+
+        // Condition (1)-(3): implicit / abstracted
+        event Cond1_OK(signer, owner);
+        event Cond2_OK(signer, owner);
+        event Cond3_OK(signer, owner);
+
+        // Condition (4): labels_field ≤ owner_labels
+        // For this minimal model, we accept any labels_field (abstracted)
+        event Cond4_OK(signer, owner);
+
+        // *** BROKEN: Condition (4b) MISSING ***
+        // Should check: signer_labels ≤ labels_field
+        // For attacker_test (2 labels) and labels_field='L1' (1), this FAILS
+        // But we don't check it here.
+
+        // Condition (5): time (abstracted)
+        event Cond5_OK(signer, owner);
+
+        // Condition (6): signer authoritative for owner
+        event Cond6_OK(owner, signer);
+
+        // Condition (7): signature verification
+        (
+            if signer = 'test' then
+            (
+                if verify(sig, msg, pk_test) = true then
+                (
+                    event Cond7_OK(signer, owner);
+                    event Cond8_OK(signer, owner);
+                    event Validated(owner, rdata, signer);
+
+                    // Cache write for test. signer
+                    if rr_type = 'NSEC' then
+                    (
+                        event Cached_NSEC(~r_id, owner, rdata, signer);
+                        insert <'NSEC', ~r_id, owner>, <rdata, signer>
+                    )
+                    else
+                    (
+                        insert <'exact', ~r_id, owner, rr_type>, <rdata, signer>
+                    )
+                )
+            )
+            else if signer = 'attacker_test' then
+            (
+                if verify(sig, msg, pk_attacker_test) = true then
+                (
+                    event Cond7_OK(signer, owner);
+                    event Cond8_OK(signer, owner);
+                    event Validated(owner, rdata, signer);
+
+                    // The attack path: labels_field = 'L1', owner = 'www_attacker_test'
+                    // wildcard_base = star(rightmost(1, owner)) = star('test')
+                    // This poisons the *.test. wildcard cache with attacker's data
+                    if labels_field = 'L1' then
+                    (
+                        if owner = 'www_attacker_test' then
+                        (
+                            // ATTACK: cache under *.test. with signer = attacker_test
+                            event Cached_Wildcard(~r_id, star('test'), rr_type, rdata, signer);
+                            insert <'wildcard', ~r_id, star('test'), rr_type>, <rdata, signer>
+                        )
+                        else
+                        (
+                            insert <'exact', ~r_id, owner, rr_type>, <rdata, signer>
+                        )
+                    )
+                    else
+                    (
+                        insert <'exact', ~r_id, owner, rr_type>, <rdata, signer>
+                    )
+                )
+            )
+        )
+    )
+
+
+// RFC 8198 synthesis
+let Synth(~r_id) =
+    !(
+        in(<'query', q_name>);
+
+        // Check NSEC cache (any entry counts as proof of non-existence)
+        // We look for a specific NSEC owner to avoid unbound variable
+        lookup <'NSEC', ~r_id, 'attacker_test'> as nsec_entry in
+        (
+            // Check wildcard cache for *.test.
+            lookup <'wildcard', ~r_id, star('test'), 'A'> as wc_entry in
+            (
+                let <wc_rdata, wc_signer> = wc_entry in
+
+                // Synthesize AD=1 answer
+                // In attack: wc_signer = 'attacker_test', q_name = 'nope_test'
+                // But InBailiwick('nope_test', 'attacker_test') was NEVER emitted!
+                event AD_Answer_Signed_By(~r_id, q_name, wc_rdata, wc_signer);
+                out(<'answer', q_name, wc_rdata, 'AD=1'>)
+            )
+        )
+    )
+
+
+// =============================================================================
+// Section 3. Main process
+// =============================================================================
+
+process:
+    new ~sk_root;
+    new ~sk_test;
+    new ~sk_attacker_test;
+    new ~r_id;
+
+    event ModelInit();
+
+    // Leak attacker key
+    out(~sk_attacker_test);
+
+    // Init bailiwick table
+    event InBailiwick('test', 'test');
+    event InBailiwick('attacker_test', 'test');
+    event InBailiwick('attacker_test', 'attacker_test');
+    event InBailiwick('www_attacker_test', 'test');
+    event InBailiwick('www_attacker_test', 'attacker_test');
+    event InBailiwick('nope_test', 'test');
+    // InBailiwick('nope_test', 'attacker_test') is ABSENT - this is the key!
+
+    (
+        HonestTestServer(~sk_test)
+        ||
+        Resolver(~r_id, pk(~sk_test), pk(~sk_attacker_test))
+        ||
+        Synth(~r_id)
+        ||
+        // Key leak detector: triggers if attacker obtains honest keys
+        !(
+            in(x);
+            if x = ~sk_test then event HonestKeyLeaked(x)
+            else if x = ~sk_root then event HonestKeyLeaked(x)
+        )
+    )
+
+
+// =============================================================================
+// Section 4. Lemmas
+// =============================================================================
+
+/*
+ * zone_boundary_integrity
+ *
+ * Every AD=1 answer must be signed by a zone that covers the answered name.
+ *
+ * Expected: FALSIFIED on this broken model.
+ * Attack trace: AD_Answer_Signed_By(r, 'nope_test', _, 'attacker_test')
+ *               but InBailiwick('nope_test', 'attacker_test') was never emitted.
+ */
+lemma zone_boundary_integrity:
+    "All r name rdata signer #t1.
+        AD_Answer_Signed_By(r, name, rdata, signer) @ t1
+        ==>
+        (Ex #t2. InBailiwick(name, signer) @ t2 & t2 < t1)"
+
+
+/*
+ * attack_exists
+ *
+ * The attack trace is reachable.
+ *
+ * Expected: TRACE FOUND
+ */
+lemma attack_exists:
+    exists-trace
+    "Ex r rdata #t.
+        AD_Answer_Signed_By(r, 'nope_test', rdata, 'attacker_test') @ t"
+
+
+/*
+ * claim_A_all_eight_conditions_satisfied (Claim A)
+ *
+ * There exists a trace where the attacker's RRSIG passes all eight RFC 4035
+ * conditions and gets validated, despite having Labels=1 < signer_labels=2.
+ *
+ * This witnesses that RFC conditions (1)-(8) are jointly satisfiable by
+ * the attack RRSIG - the missing check is (4b).
+ *
+ * Expected: TRACE FOUND on broken model
+ */
+lemma claim_A_all_eight_conditions_satisfied:
+    exists-trace
+    "Ex owner rdata #t1 #t2 #t3 #t4 #t5 #t6 #t7 #t8 #tv.
+        Cond1_OK('attacker_test', owner) @ t1 &
+        Cond2_OK('attacker_test', owner) @ t2 &
+        Cond3_OK('attacker_test', owner) @ t3 &
+        Cond4_OK('attacker_test', owner) @ t4 &
+        Cond5_OK('attacker_test', owner) @ t5 &
+        Cond6_OK(owner, 'attacker_test') @ t6 &
+        Cond7_OK('attacker_test', owner) @ t7 &
+        Cond8_OK('attacker_test', owner) @ t8 &
+        Validated(owner, rdata, 'attacker_test') @ tv"
+
+
+/*
+ * sanity_honest_signing_keys_secret
+ *
+ * The attacker never learns the honest zone keys (sk_test, sk_root).
+ * Only sk_attacker_test is leaked intentionally.
+ *
+ * Expected: VERIFIED on both broken and fixed models
+ */
+lemma sanity_honest_signing_keys_secret:
+    "All sk #i. HonestKeyLeaked(sk) @ i ==> F"
+
+
+end

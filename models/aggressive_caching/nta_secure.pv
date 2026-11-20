@@ -1,0 +1,293 @@
+(*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: nta_secure.pv
+ *
+ * NTA Cache Poisoning Vulnerability Model - SECURE Implementation (ProVerif)
+ * Property 22 mitigation: Validation status tracked, unvalidated NSEC rejected
+ *)
+
+(* ============================================================
+   Types
+   ============================================================ *)
+type key.
+type zone_t.
+type qname_t.
+type qid_t.
+type ip_t.
+
+(* ============================================================
+   Channels
+   ============================================================ *)
+free c: channel.                      (* Public channel - attacker can see *)
+free resolver_to_ns: channel.         (* Resolver to NS - attacker can intercept *)
+free client_to_resolver: channel [private].  (* Client to resolver *)
+free nta_channel: channel [private].  (* NTA status channel *)
+
+(* SECURE: Separate cache channels for validated vs unvalidated NSEC *)
+free validated_cache: channel [private].   (* Only validated NSEC - can be used for synthesis *)
+free insecure_cache: channel [private].    (* Unvalidated NSEC - CANNOT be used for synthesis *)
+
+(* ============================================================
+   Constants
+   ============================================================ *)
+const NSEC: bitstring.
+const NXDOMAIN: bitstring.
+const NOERROR: bitstring.
+const SERVFAIL: bitstring.
+const NTA_ACTIVE: bitstring.
+const NTA_EXPIRED: bitstring.
+const VALIDATED_NSEC: bitstring.
+const INSECURE_NSEC: bitstring.
+const INVALID_SIG: bitstring.
+const A: bitstring.
+const aaa: bitstring.  (* NSEC range start *)
+const zzz: bitstring.  (* NSEC range end *)
+
+(* ============================================================
+   Functions
+   ============================================================ *)
+fun pk(key): key.
+fun sign(bitstring, key): bitstring.
+fun h(bitstring): bitstring.
+
+(* Signature verification *)
+reduc forall m: bitstring, k: key; verify(sign(m, k), pk(k), m) = true.
+
+(* NSEC record constructor *)
+fun nsec_record(zone_t, bitstring, bitstring): bitstring.
+
+(* ============================================================
+   Events
+   ============================================================ *)
+(* Client events *)
+event ClientSendQuery(ip_t, qname_t, qid_t).
+event ClientReceivedNXDOMAIN(ip_t, qname_t).
+event ClientReceivedAnswer(ip_t, qname_t).
+
+(* Resolver events *)
+event ResolverRecvQuery(ip_t, qname_t, qid_t).
+event ResolverForwardQuery(ip_t, qname_t, qid_t).
+event CacheValidatedNSEC(ip_t, bitstring).
+event CacheNSECDuringNTA(ip_t, bitstring, zone_t).
+event SynthesizeFromValidatedCache(ip_t, qname_t, bitstring).
+event RejectInvalidSig(ip_t, bitstring).
+
+(* Server events *)
+event AuthServerRecvQuery(ip_t, qname_t, qid_t).
+event AuthServerSendNSEC(ip_t, qname_t, bitstring).
+
+(* Attacker events *)
+event AttackerInjectNSEC(zone_t, bitstring, qname_t, qid_t).
+
+(* NTA events *)
+event ConfigureNTA(zone_t).
+event NTAExpired(zone_t).
+
+(* Attack success marker - should NOT be reachable in secure implementation *)
+event LegitDomainDeniedFromInsecureCache(qname_t).
+
+(* ============================================================
+   Queries - Security Properties
+   ============================================================ *)
+
+(* Attack reachability - can attacker cause denial from insecure cache?
+   For SECURE implementation: should NOT find attack trace *)
+query qname: qname_t; event(LegitDomainDeniedFromInsecureCache(qname)).
+
+(* Full attack sequence - should be IMPOSSIBLE *)
+query zone: zone_t, nsec: bitstring, qname: qname_t, qid: qid_t;
+    event(LegitDomainDeniedFromInsecureCache(qname)) &&
+    event(AttackerInjectNSEC(zone, nsec, qname, qid)).
+
+(* NTA bypass is still reachable (but cannot lead to synthesis) *)
+query resolver: ip_t, nsec: bitstring, zone: zone_t;
+    event(CacheNSECDuringNTA(resolver, nsec, zone)).
+
+(* Validated cache synthesis is reachable (normal operation) *)
+query resolver: ip_t, qname: qname_t, nsec: bitstring;
+    event(SynthesizeFromValidatedCache(resolver, qname, nsec)).
+
+(* Security property: synthesis only from validated cache *)
+query resolver: ip_t, qname: qname_t, nsec: bitstring;
+    event(SynthesizeFromValidatedCache(resolver, qname, nsec)) ==>
+    event(CacheValidatedNSEC(resolver, nsec)).
+
+(* ============================================================
+   Client Process
+   ============================================================ *)
+let Client(client_ip: ip_t, resolver_ip: ip_t, qname: qname_t) =
+    new qid: qid_t;
+
+    (* Send query to resolver *)
+    event ClientSendQuery(client_ip, qname, qid);
+    out(client_to_resolver, (client_ip, qname, A, qid));
+
+    (* Receive response *)
+    in(client_to_resolver, (=client_ip, response: bitstring, rcode: bitstring));
+
+    if rcode = NXDOMAIN then
+        event ClientReceivedNXDOMAIN(client_ip, qname)
+    else
+        event ClientReceivedAnswer(client_ip, qname).
+
+(* ============================================================
+   Authoritative DNS Server Process
+   ============================================================ *)
+let AuthoritativeServer(ns_ip: ip_t, zsk: key, zone: zone_t) =
+    let pk_zsk = pk(zsk) in
+    (* Publish DNSKEY *)
+    out(c, pk_zsk);
+
+    !(
+        (* Receive query *)
+        in(resolver_to_ns, (resolver_ip: ip_t, qname: qname_t, qtype: bitstring, qid: qid_t));
+        event AuthServerRecvQuery(ns_ip, qname, qid);
+
+        (* Create NSEC record for non-existent domain *)
+        let nsec_owner = h((zone, aaa)) in
+        let nsec_next = h((zone, zzz)) in
+        let nsec = nsec_record(zone, nsec_owner, nsec_next) in
+        let nsec_sig = sign(nsec, zsk) in
+
+        event AuthServerSendNSEC(ns_ip, qname, nsec);
+        (* Send response on public channel - attacker can race *)
+        out(c, (qid, NXDOMAIN, nsec, nsec_sig, pk_zsk))
+    ).
+
+(* ============================================================
+   Attacker Process (Man-in-the-Middle)
+   ============================================================ *)
+let MitMAttacker(zone: zone_t) =
+    !(
+        (* Intercept query info leaked on public channel *)
+        in(c, (qid: qid_t, qname: qname_t));
+
+        (* Create fake NSEC *)
+        let fake_nsec_owner = h((zone, aaa)) in
+        let fake_nsec_next = h((zone, zzz)) in
+        let fake_nsec = nsec_record(zone, fake_nsec_owner, fake_nsec_next) in
+
+        event AttackerInjectNSEC(zone, fake_nsec, qname, qid);
+
+        (* Inject fake response - cannot forge valid signature *)
+        out(c, (qid, NXDOMAIN, fake_nsec, INVALID_SIG, INVALID_SIG))
+    ).
+
+(* ============================================================
+   DNS Resolver Process - SECURE Implementation
+
+   Security Mechanism:
+   - Separate caches: validated_cache vs insecure_cache
+   - Only uses validated_cache for response synthesis
+   - NSEC cached during NTA goes to insecure_cache (cannot be used)
+   ============================================================ *)
+let ResolverSecure(resolver_ip: ip_t, ns_ip: ip_t, trust_anchor: key, zone: zone_t) =
+    !(
+        (* Receive query from client *)
+        in(client_to_resolver, (client_ip: ip_t, qname: qname_t, qtype: bitstring, qid: qid_t));
+        event ResolverRecvQuery(resolver_ip, qname, qid);
+
+        (*
+         * SECURE: Only check VALIDATED cache for synthesis
+         * insecure_cache is NEVER read for synthesis
+         *)
+        (
+            (* Option 1: Cache hit in VALIDATED cache only *)
+            in(validated_cache, (=VALIDATED_NSEC, cached_zone: zone_t, cached_nsec: bitstring));
+
+            (* SECURE: This NSEC was cryptographically validated *)
+            event SynthesizeFromValidatedCache(resolver_ip, qname, cached_nsec);
+
+            out(client_to_resolver, (client_ip, cached_nsec, NXDOMAIN));
+
+            (* Put back in validated cache *)
+            out(validated_cache, (VALIDATED_NSEC, cached_zone, cached_nsec))
+        )
+        |
+        (
+            (* Option 2: Cache miss - forward to authoritative server *)
+            event ResolverForwardQuery(resolver_ip, qname, qid);
+
+            (* Forward query *)
+            out(resolver_to_ns, (resolver_ip, qname, qtype, qid));
+            (* Leak query info to attacker *)
+            out(c, (qid, qname));
+
+            (* Receive response from public channel (server or attacker) *)
+            in(c, (=qid, rcode: bitstring, nsec: bitstring, sig: bitstring, dnskey: key));
+
+            if rcode = NXDOMAIN then
+            (
+                (* Check NTA status *)
+                (
+                    (* NTA is active - bypass validation but mark as INSECURE *)
+                    in(nta_channel, (=NTA_ACTIVE, nta_zone: zone_t));
+
+                    (* SECURE: Cache in INSECURE cache - CANNOT be used for synthesis *)
+                    event CacheNSECDuringNTA(resolver_ip, nsec, nta_zone);
+                    out(insecure_cache, (INSECURE_NSEC, nta_zone, nsec));
+
+                    (* Return response to client for current query *)
+                    out(client_to_resolver, (client_ip, nsec, NXDOMAIN));
+
+                    (* Put NTA status back *)
+                    out(nta_channel, (NTA_ACTIVE, nta_zone))
+                )
+                |
+                (
+                    (* No NTA - validate signature *)
+                    if verify(sig, dnskey, nsec) = true then
+                    (
+                        if dnskey = trust_anchor then
+                        (
+                            (* SECURE: Cache in VALIDATED cache - can be used for synthesis *)
+                            event CacheValidatedNSEC(resolver_ip, nsec);
+                            out(validated_cache, (VALIDATED_NSEC, zone, nsec));
+                            out(client_to_resolver, (client_ip, nsec, NXDOMAIN))
+                        )
+                    )
+                    else
+                    (
+                        event RejectInvalidSig(resolver_ip, nsec);
+                        out(client_to_resolver, (client_ip, SERVFAIL, SERVFAIL))
+                    )
+                )
+            )
+        )
+    ).
+
+(* ============================================================
+   Administrator Process
+   ============================================================ *)
+let Administrator(zone: zone_t) =
+    (* Configure NTA *)
+    event ConfigureNTA(zone);
+    out(nta_channel, (NTA_ACTIVE, zone));
+
+    (* NTA expires after some time *)
+    in(c, trigger: bitstring);  (* External trigger *)
+    event NTAExpired(zone).
+
+(* ============================================================
+   Main Process
+   ============================================================ *)
+process
+    (* Generate keys *)
+    new zsk: key;
+    let pk_zsk = pk(zsk) in
+
+    (* Create identifiers *)
+    new zone: zone_t;
+    new client_ip: ip_t;
+    new resolver_ip: ip_t;
+    new ns_ip: ip_t;
+    new target_domain: qname_t;
+
+    (* Run all processes *)
+    (
+        Administrator(zone) |
+        AuthoritativeServer(ns_ip, zsk, zone) |
+        ResolverSecure(resolver_ip, ns_ip, pk_zsk, zone) |
+        !Client(client_ip, resolver_ip, target_domain) |
+        MitMAttacker(zone)
+    )

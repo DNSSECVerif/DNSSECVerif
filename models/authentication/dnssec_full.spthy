@@ -1,0 +1,471 @@
+/*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: dnssec_full.spthy
+ *
+ * DNSSEC Authentication Model - Full Version (KSK/ZSK Separation)
+ * Properties 10-14: Data Origin Authentication, Integrity, Chain of Trust
+ *
+ * Full DNSSEC key hierarchy: KSK signs DNSKEY, ZSK signs other RRsets
+ * Hierarchy: Root -> TLD -> SLD (3 levels)
+ */
+
+theory DNSSECAuthFull
+begin
+
+builtins: signing, hashing
+
+/*============================================================================
+ * SECTION 1: Function Declarations
+ *============================================================================*/
+
+functions:
+    // RRset constructor: <owner_name, rrtype, rdata>
+    rrset/3,
+
+    // DS record: hash of child zone's KSK
+    // ds_record(child_zone, key_tag, algorithm, digest_type, digest)
+    ds_record/3,  // Simplified: ds_record(child_zone, digest, sig)
+
+    // DNSKEY record with key type
+    // dnskey(zone, flags, pk) where flags indicates KSK (257) or ZSK (256)
+    dnskey_ksk/2,  // dnskey_ksk(zone, pk)
+    dnskey_zsk/2,  // dnskey_zsk(zone, pk)
+
+    // RRSIG record
+    rrsig/4,  // rrsig(type_covered, signer, sig, labels)
+
+    // Projection functions
+    get_owner/1, get_type/1, get_data/1,
+    get_zone/1, get_pk/1
+
+equations:
+    get_owner(rrset(o,t,d)) = o,
+    get_type(rrset(o,t,d)) = t,
+    get_data(rrset(o,t,d)) = d,
+    get_zone(dnskey_ksk(z,k)) = z,
+    get_pk(dnskey_ksk(z,k)) = k,
+    get_zone(dnskey_zsk(z,k)) = z,
+    get_pk(dnskey_zsk(z,k)) = k
+
+
+/*============================================================================
+ * SECTION 2: Root Zone Setup (Trust Anchor)
+ *
+ * The root zone's KSK is the trust anchor. The resolver has this key
+ * pre-configured (out-of-band distribution).
+ *============================================================================*/
+
+rule RootZoneSetup:
+    [ Fr(~skKSK_root), Fr(~skZSK_root) ]
+  --[
+      TrustAnchorCreated(pk(~skKSK_root))
+    , RootZoneInitialized(pk(~skKSK_root), pk(~skZSK_root))
+    ]->
+    [ // Trust anchor (KSK public key known to resolver)
+      !TrustAnchor(pk(~skKSK_root))
+
+      // Root zone keys
+    , !RootKSK(~skKSK_root, pk(~skKSK_root))
+    , !RootZSK(~skZSK_root, pk(~skZSK_root))
+
+      // Public keys are known
+    , Out(pk(~skKSK_root))
+    , Out(pk(~skZSK_root))
+    ]
+
+
+/*============================================================================
+ * SECTION 3: TLD Zone Setup
+ *============================================================================*/
+
+rule TLDZoneSetup:
+    [ Fr(~skKSK_tld), Fr(~skZSK_tld) ]
+  --[ TLDZoneInitialized(pk(~skKSK_tld), pk(~skZSK_tld)) ]->
+    [ !TLDKSK(~skKSK_tld, pk(~skKSK_tld))
+    , !TLDZSK(~skZSK_tld, pk(~skZSK_tld))
+    , Out(pk(~skKSK_tld))
+    , Out(pk(~skZSK_tld))
+    ]
+
+
+/*============================================================================
+ * SECTION 4: SLD Zone Setup
+ *============================================================================*/
+
+rule SLDZoneSetup:
+    [ Fr(~skKSK_sld), Fr(~skZSK_sld) ]
+  --[ SLDZoneInitialized(pk(~skKSK_sld), pk(~skZSK_sld)) ]->
+    [ !SLDKSK(~skKSK_sld, pk(~skKSK_sld))
+    , !SLDZSK(~skZSK_sld, pk(~skZSK_sld))
+    , Out(pk(~skKSK_sld))
+    , Out(pk(~skZSK_sld))
+    ]
+
+
+/*============================================================================
+ * SECTION 5: DS Record Creation (Chain of Trust Links)
+ *
+ * Parent zones create DS records containing the hash of child's KSK.
+ * DS records are signed by the parent's ZSK.
+ *============================================================================*/
+
+// Root creates DS for TLD (signed by root's ZSK)
+rule RootCreateDS_TLD:
+    [ !RootZSK(skZSK_root, pkZSK_root)
+    , !TLDKSK(skKSK_tld, pkKSK_tld)
+    ]
+  --[
+      RootCreatesDS('tld', h(pkKSK_tld))
+    , ZoneOwns('root', ds_record('tld', h(pkKSK_tld), sign(ds_record('tld', h(pkKSK_tld), 'placeholder'), skZSK_root)))
+    , ZoneIssuesSig('root', ds_record('tld', h(pkKSK_tld), 'unsigned'),
+                    sign(<'DS', 'tld', h(pkKSK_tld)>, skZSK_root))
+    , DSCreated('root', 'tld')
+    ]->
+    [ !RootDS_TLD(h(pkKSK_tld), sign(<'DS', 'tld', h(pkKSK_tld)>, skZSK_root))
+    , Out(<'DS', 'tld', h(pkKSK_tld), sign(<'DS', 'tld', h(pkKSK_tld)>, skZSK_root)>)
+    ]
+
+
+// TLD creates DS for SLD (signed by TLD's ZSK)
+rule TLDCreateDS_SLD:
+    [ !TLDZSK(skZSK_tld, pkZSK_tld)
+    , !SLDKSK(skKSK_sld, pkKSK_sld)
+    ]
+  --[
+      TLDCreatesDS('sld', h(pkKSK_sld))
+    , ZoneOwns('tld', ds_record('sld', h(pkKSK_sld), 'unsigned'))
+    , ZoneIssuesSig('tld', ds_record('sld', h(pkKSK_sld), 'unsigned'),
+                    sign(<'DS', 'sld', h(pkKSK_sld)>, skZSK_tld))
+    , DSCreated('tld', 'sld')
+    ]->
+    [ !TLD_DS_SLD(h(pkKSK_sld), sign(<'DS', 'sld', h(pkKSK_sld)>, skZSK_tld))
+    , Out(<'DS', 'sld', h(pkKSK_sld), sign(<'DS', 'sld', h(pkKSK_sld)>, skZSK_tld)>)
+    ]
+
+
+/*============================================================================
+ * SECTION 6: DNSKEY RRset Signing (KSK signs DNSKEY RRset)
+ *
+ * Each zone's KSK signs the DNSKEY RRset (containing both KSK and ZSK).
+ * This is how the ZSK becomes trusted.
+ *============================================================================*/
+
+// Root signs its DNSKEY RRset with KSK
+rule RootSignDNSKEYRRset:
+    [ !RootKSK(skKSK, pkKSK)
+    , !RootZSK(skZSK, pkZSK)
+    ]
+  --[
+      ZoneOwnsDNSKEY('root', pkKSK, pkZSK)
+    , ZoneIssuesSig('root', <'DNSKEY', 'root', pkKSK, pkZSK>,
+                    sign(<'DNSKEY', 'root', pkKSK, pkZSK>, skKSK))
+    , DNSKEYSigned('root')
+    ]->
+    [ Out(<'DNSKEY', 'root', pkKSK, pkZSK,
+           sign(<'DNSKEY', 'root', pkKSK, pkZSK>, skKSK)>) ]
+
+
+// TLD signs its DNSKEY RRset with KSK
+rule TLDSignDNSKEYRRset:
+    [ !TLDKSK(skKSK, pkKSK)
+    , !TLDZSK(skZSK, pkZSK)
+    ]
+  --[
+      ZoneOwnsDNSKEY('tld', pkKSK, pkZSK)
+    , ZoneIssuesSig('tld', <'DNSKEY', 'tld', pkKSK, pkZSK>,
+                    sign(<'DNSKEY', 'tld', pkKSK, pkZSK>, skKSK))
+    , DNSKEYSigned('tld')
+    ]->
+    [ Out(<'DNSKEY', 'tld', pkKSK, pkZSK,
+           sign(<'DNSKEY', 'tld', pkKSK, pkZSK>, skKSK)>) ]
+
+
+// SLD signs its DNSKEY RRset with KSK
+rule SLDSignDNSKEYRRset:
+    [ !SLDKSK(skKSK, pkKSK)
+    , !SLDZSK(skZSK, pkZSK)
+    ]
+  --[
+      ZoneOwnsDNSKEY('sld', pkKSK, pkZSK)
+    , ZoneIssuesSig('sld', <'DNSKEY', 'sld', pkKSK, pkZSK>,
+                    sign(<'DNSKEY', 'sld', pkKSK, pkZSK>, skKSK))
+    , DNSKEYSigned('sld')
+    ]->
+    [ Out(<'DNSKEY', 'sld', pkKSK, pkZSK,
+           sign(<'DNSKEY', 'sld', pkKSK, pkZSK>, skKSK)>) ]
+
+
+/*============================================================================
+ * SECTION 7: RRset Signing (ZSK signs data records)
+ *
+ * The ZSK signs all regular RRsets (A, MX, NS, etc.)
+ *============================================================================*/
+
+// SLD creates and signs an RRset (e.g., A record)
+rule SLDSignRRset:
+    [ !SLDZSK(skZSK, pkZSK)
+    , Fr(~rdata)
+    ]
+  --[
+      ZoneOwns('sld', rrset('www.sld', 'A', ~rdata))
+    , ZoneIssuesSig('sld', rrset('www.sld', 'A', ~rdata),
+                    sign(rrset('www.sld', 'A', ~rdata), skZSK))
+    , ServerSendRRset('sld', rrset('www.sld', 'A', ~rdata))
+    , RRsetCreated('sld', 'www.sld', 'A')
+    ]->
+    [ Out(<rrset('www.sld', 'A', ~rdata),
+           sign(rrset('www.sld', 'A', ~rdata), skZSK)>) ]
+
+
+/*============================================================================
+ * SECTION 8: Resolver - Full Chain of Trust Verification
+ *
+ * The resolver performs complete DNSSEC validation:
+ * 1. Verify root's DNSKEY RRset (self-signed by KSK = trust anchor)
+ * 2. Verify TLD's DS in root zone (signed by root's ZSK)
+ * 3. Verify TLD's DNSKEY RRset (signed by TLD's KSK, hash matches DS)
+ * 4. Verify SLD's DS in TLD zone (signed by TLD's ZSK)
+ * 5. Verify SLD's DNSKEY RRset (signed by SLD's KSK, hash matches DS)
+ * 6. Verify target RRset (signed by SLD's ZSK)
+ *============================================================================*/
+
+rule ResolverFullChainValidation:
+    let
+        // RRset to validate
+        target_rr = rrset(owner, rtype, rdata)
+    in
+    [ // Trust anchor
+      !TrustAnchor(pkKSK_root)
+
+      // Root's DNSKEY RRset (self-signed by root KSK)
+    , In(<'DNSKEY', 'root', pkKSK_root, pkZSK_root, sig_root_dnskey>)
+
+      // DS for TLD (signed by root ZSK)
+    , In(<'DS', 'tld', digest_tld, sig_ds_tld>)
+
+      // TLD's DNSKEY RRset (signed by TLD KSK)
+    , In(<'DNSKEY', 'tld', pkKSK_tld, pkZSK_tld, sig_tld_dnskey>)
+
+      // DS for SLD (signed by TLD ZSK)
+    , In(<'DS', 'sld', digest_sld, sig_ds_sld>)
+
+      // SLD's DNSKEY RRset (signed by SLD KSK)
+    , In(<'DNSKEY', 'sld', pkKSK_sld, pkZSK_sld, sig_sld_dnskey>)
+
+      // Target RRset (signed by SLD ZSK)
+    , In(<target_rr, sig_rr>)
+    ]
+  --[
+      // Step 1: Verify root DNSKEY (trust anchor check)
+      Eq(verify(sig_root_dnskey, <'DNSKEY', 'root', pkKSK_root, pkZSK_root>, pkKSK_root), true)
+    , ChainStep('root', 'root_dnskey')
+
+      // Step 2: Verify DS for TLD (signed by root ZSK)
+    , Eq(verify(sig_ds_tld, <'DS', 'tld', digest_tld>, pkZSK_root), true)
+    , ChainStep('root', 'tld')
+
+      // Step 3: Verify TLD DNSKEY and DS hash match
+    , Eq(verify(sig_tld_dnskey, <'DNSKEY', 'tld', pkKSK_tld, pkZSK_tld>, pkKSK_tld), true)
+    , Eq(digest_tld, h(pkKSK_tld))  // DS digest matches KSK hash
+    , ChainStep('tld', 'tld_dnskey')
+
+      // Step 4: Verify DS for SLD (signed by TLD ZSK)
+    , Eq(verify(sig_ds_sld, <'DS', 'sld', digest_sld>, pkZSK_tld), true)
+    , ChainStep('tld', 'sld')
+
+      // Step 5: Verify SLD DNSKEY and DS hash match
+    , Eq(verify(sig_sld_dnskey, <'DNSKEY', 'sld', pkKSK_sld, pkZSK_sld>, pkKSK_sld), true)
+    , Eq(digest_sld, h(pkKSK_sld))  // DS digest matches KSK hash
+    , ChainStep('sld', 'sld_dnskey')
+
+      // Step 6: Verify target RRset (signed by SLD ZSK)
+    , Eq(verify(sig_rr, target_rr, pkZSK_sld), true)
+
+      // Acceptance events
+    , ResolverAccepts(target_rr, sig_rr)
+    , ChainVerified('root', 'sld')
+    , FullChainValidated(owner, rtype)
+    ]->
+    [ ResolverAcceptedRR(target_rr, sig_rr, 'secure') ]
+
+
+/*============================================================================
+ * SECTION 9: Adversary Capabilities
+ *============================================================================*/
+
+// Adversary can create their own zone with their own keys
+rule AdversaryCreateZone:
+    [ Fr(~skAdv) ]
+  --[ AdversaryKey(pk(~skAdv)) ]->
+    [ Out(~skAdv), Out(pk(~skAdv)) ]
+
+
+/*============================================================================
+ * SECTION 10: Restrictions
+ *============================================================================*/
+
+restriction Equality:
+    "All x y #i. Eq(x, y) @ #i ==> x = y"
+
+
+/*============================================================================
+ * SECTION 11: Security Properties (Lemmas)
+ *============================================================================*/
+
+/*---------------------------------------------------------------------------
+ * Sanity Checks (Executability)
+ *---------------------------------------------------------------------------*/
+
+lemma sanity_trust_anchor:
+    exists-trace
+    "Ex pk #i. TrustAnchorCreated(pk) @ #i"
+
+lemma sanity_zones_initialized:
+    exists-trace
+    "Ex pkKSK_root pkZSK_root pkKSK_tld pkZSK_tld pkKSK_sld pkZSK_sld #i #j #k.
+        RootZoneInitialized(pkKSK_root, pkZSK_root) @ #i
+        & TLDZoneInitialized(pkKSK_tld, pkZSK_tld) @ #j
+        & SLDZoneInitialized(pkKSK_sld, pkZSK_sld) @ #k"
+
+lemma sanity_ds_chain_created:
+    exists-trace
+    "Ex #i #j.
+        DSCreated('root', 'tld') @ #i
+        & DSCreated('tld', 'sld') @ #j"
+
+lemma sanity_full_chain_validated:
+    exists-trace
+    "Ex owner rtype #i.
+        FullChainValidated(owner, rtype) @ #i"
+
+lemma sanity_resolver_accepts:
+    exists-trace
+    "Ex rr sig #i. ResolverAccepts(rr, sig) @ #i"
+
+
+/*---------------------------------------------------------------------------
+ * PROPERTY 9: Data Origin Authentication
+ *
+ * Any RRset accepted by the resolver originated from its authoritative zone.
+ *---------------------------------------------------------------------------*/
+
+lemma property9_data_origin_authentication [reuse]:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex zone #j #k.
+            ZoneOwns(zone, rr) @ #j
+            & ZoneIssuesSig(zone, rr, sig) @ #k
+            & #j < #i
+            & #k < #i)"
+
+// The zone that owns is the zone that signed
+lemma property9_owner_signer_match:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex zone #j #k.
+            ZoneOwns(zone, rr) @ #j
+            & ZoneIssuesSig(zone, rr, sig) @ #k)"
+
+
+/*---------------------------------------------------------------------------
+ * PROPERTY 10: Comprehensive Record Validation
+ *
+ * Every RRset published by a zone has a valid signature.
+ *---------------------------------------------------------------------------*/
+
+lemma property10_all_rrsets_signed:
+    "All zone rr #i.
+        ServerSendRRset(zone, rr) @ #i
+        ==>
+        (Ex sig #j.
+            ZoneIssuesSig(zone, rr, sig) @ #j)"
+
+lemma property10_dnskey_signed:
+    "All zone #i.
+        DNSKEYSigned(zone) @ #i
+        ==>
+        (Ex pkKSK pkZSK #j.
+            ZoneOwnsDNSKEY(zone, pkKSK, pkZSK) @ #j)"
+
+
+/*---------------------------------------------------------------------------
+ * PROPERTY 11: Integrity Preservation
+ *
+ * Adversary cannot forge signatures (UF-CMA, built into signing builtin).
+ *---------------------------------------------------------------------------*/
+
+lemma property11_no_forgery:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex zone #j.
+            ZoneIssuesSig(zone, rr, sig) @ #j)"
+
+
+/*---------------------------------------------------------------------------
+ * PROPERTY 12: Chain of Trust Integrity
+ *
+ * Acceptance requires complete chain verification from trust anchor.
+ *---------------------------------------------------------------------------*/
+
+// Full chain must be verified
+lemma property12_chain_verified_before_accept:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex #j. ChainVerified('root', 'sld') @ #j)"
+
+// All chain steps must occur
+lemma property12_all_chain_steps:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex #a #b #c #d #e.
+            ChainStep('root', 'root_dnskey') @ #a
+            & ChainStep('root', 'tld') @ #b
+            & ChainStep('tld', 'tld_dnskey') @ #c
+            & ChainStep('tld', 'sld') @ #d
+            & ChainStep('sld', 'sld_dnskey') @ #e)"
+
+// DS records must exist in the chain
+lemma property12_ds_chain_required:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex h_tld h_sld #j #k.
+            RootCreatesDS('tld', h_tld) @ #j
+            & TLDCreatesDS('sld', h_sld) @ #k
+            & #j < #i
+            & #k < #i)"
+
+// Adversary cannot bypass chain (no key injection without trust anchor)
+lemma property12_no_chain_bypass:
+    "All rr sig #i.
+        ResolverAccepts(rr, sig) @ #i
+        ==>
+        (Ex pkTA #init.
+            TrustAnchorCreated(pkTA) @ #init
+            & #init < #i)"
+
+
+/*---------------------------------------------------------------------------
+ * Combined Security Theorem
+ *---------------------------------------------------------------------------*/
+
+lemma dnssec_security_theorem:
+    "All rr sig #accept.
+        ResolverAccepts(rr, sig) @ #accept
+        ==>
+        // P9: Origin authentication
+        (Ex zone #own #sign.
+            ZoneOwns(zone, rr) @ #own
+            & ZoneIssuesSig(zone, rr, sig) @ #sign)
+        // P12: Chain verified
+        & (Ex #chain. ChainVerified('root', 'sld') @ #chain)
+        // Trust anchor established
+        & (Ex pk #ta. TrustAnchorCreated(pk) @ #ta & #ta < #accept)"
+
+
+end

@@ -1,0 +1,76 @@
+cff-version: 1.2.0
+message: >-
+  If you use this artifact, please cite the paper listed under
+  preferred-citation.
+type: software
+title: DNSSECVerif
+abstract: >-
+  SAPIC+ models, companion ProVerif models, verification scripts, and TLD
+  census data for the ACM CCS 2026 paper Mind the Gap: Cross-RFC Formal
+  Analysis Exposes DNSSEC's Hidden Vulnerabilities.
+license: GPL-3.0-only
+repository-code: https://github.com/DNSSECVerif/DNSSECVerif
+url: https://github.com/DNSSECVerif/DNSSECVerif
+authors:
+  - family-names: Zhang
+    given-names: Qifan
+    affiliation: Palo Alto Networks
+    email: qzhang@paloaltonetworks.com
+    orcid: https://orcid.org/0000-0002-9278-9576
+  - family-names: Shen
+    given-names: Zilin
+    affiliation: Purdue University
+    email: shen624@purdue.edu
+    orcid: https://orcid.org/0000-0001-5342-0998
+  - family-names: Karim
+    given-names: Imtiaz
+    affiliation: The University of Texas at Dallas
+    email: imtiaz.karim@utdallas.edu
+    orcid: https://orcid.org/0009-0000-8680-9932
+  - family-names: Bertino
+    given-names: Elisa
+    affiliation: Purdue University
+    email: bertino@purdue.edu
+    orcid: https://orcid.org/0000-0002-4029-7051
+  - family-names: Liu
+    given-names: Daiping
+    affiliation: Palo Alto Networks
+    email: dpliu@paloaltonetworks.com
+    orcid: https://orcid.org/0000-0002-9660-4444
+  - family-names: Li
+    given-names: Zhou
+    affiliation: University of California, Irvine
+    email: zhou.li@uci.edu
+    orcid: https://orcid.org/0000-0002-9401-1012
+contact:
+  - family-names: Li
+    given-names: Zhou
+    email: zhou.li@uci.edu
+    orcid: https://orcid.org/0000-0002-9401-1012
+preferred-citation:
+  type: conference-paper
+  title: "Mind the Gap: Cross-RFC Formal Analysis Exposes DNSSEC's Hidden Vulnerabilities"
+  year: 2026
+  doi: 10.1145/3830454.3846592
+  collection-title: Proceedings of the 2026 ACM SIGSAC Conference on Computer and Communications Security
+  publisher:
+    name: Association for Computing Machinery
+  conference:
+    name: "CCS '26"
+    city: The Hague
+    country: NL
+    date-start: 2026-11-15
+    date-end: 2026-11-19
+  authors:
+    - family-names: Zhang
+      given-names: Qifan
+    - family-names: Shen
+      given-names: Zilin
+    - family-names: Karim
+      given-names: Imtiaz
+    - family-names: Bertino
+      given-names: Elisa
+    - family-names: Liu
+      given-names: Daiping
+    - family-names: Li
+      given-names: Zhou

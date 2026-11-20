@@ -1,0 +1,195 @@
+# Docker Compose Configuration
+# ============================
+# DNSSECVerif, GPL-3.0-only. See README.md.
+#
+# Usage:
+#   docker compose up                    # Quick verification
+#   docker compose run verify --full     # Full verification
+#   docker compose run interactive       # Interactive Tamarin GUI
+#
+# Profiles:
+#   docker compose --profile full up     # Run full verification
+#   docker compose --profile dev up      # Development mode with shell
+#
+
+services:
+  # ===========================================================================
+  # Quick Verification (default)
+  # ===========================================================================
+  verify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dnssecverif:latest
+    container_name: dnssecverif-verify
+    volumes:
+      - ./results:/app/results
+    command: ["--quick", "--json"]
+    # Increase file descriptor limits for Tamarin
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # ===========================================================================
+  # Full Verification
+  # ===========================================================================
+  verify-full:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dnssecverif:latest
+    container_name: dnssecverif-full
+    profiles:
+      - full
+    volumes:
+      - ./results:/app/results
+    command: ["--full", "--json"]
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    # Long-running jobs; do not infer a completion budget from this grace period.
+    stop_grace_period: 48h
+
+  # ===========================================================================
+  # Interactive Tamarin GUI
+  # ===========================================================================
+  interactive:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dnssecverif:latest
+    container_name: dnssecverif-interactive
+    profiles:
+      - interactive
+    ports:
+      - "127.0.0.1:3001:3001"
+    command: ["interactive"]
+    stdin_open: true
+    tty: true
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # ===========================================================================
+  # Development Shell
+  # ===========================================================================
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dnssecverif:latest
+    container_name: dnssecverif-dev
+    profiles:
+      - dev
+    volumes:
+      # Mount models for live editing
+      - ./models:/app/models:ro
+      - ./run_all.sh:/app/run_all.sh:ro
+      - ./results:/app/results
+    command: ["bash"]
+    stdin_open: true
+    tty: true
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # ===========================================================================
+  # Individual Model Groups
+  # ===========================================================================
+
+  # Cache models (long-running)
+  verify-cache:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dnssecverif:latest
+    container_name: dnssecverif-cache
+    profiles:
+      - cache
+    volumes:
+      - ./results:/app/results
+    command: ["--full", "--group", "cache", "--json"]
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    stop_grace_period: 24h
+
+  # Authentication models (fast)
+  verify-auth:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dnssecverif:latest
+    container_name: dnssecverif-auth
+    profiles:
+      - auth
+    volumes:
+      - ./results:/app/results
+    command: ["--group", "auth", "--json"]
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # Denial models (fast)
+  verify-denial:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dnssecverif:latest
+    container_name: dnssecverif-denial
+    profiles:
+      - denial
+    volumes:
+      - ./results:/app/results
+    command: ["--group", "denial", "--json"]
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # Aggressive caching models (medium)
+  verify-aggressive:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dnssecverif:latest
+    container_name: dnssecverif-aggressive
+    profiles:
+      - aggressive
+    volumes:
+      - ./results:/app/results
+    command: ["--group", "aggressive", "--json"]
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+  # Attack validation models (fast)
+  verify-attacks:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: dnssecverif:latest
+    container_name: dnssecverif-attacks
+    profiles:
+      - attacks
+    volumes:
+      - ./results:/app/results
+    command: ["--group", "attacks", "--json"]
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+
+# ===========================================================================
+# Shared Configuration
+# ===========================================================================
+networks:
+  default:
+    name: dnssecverif-network

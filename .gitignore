@@ -1,0 +1,30 @@
+# Local execution output, never evidence for the published paper by default.
+/results/
+*.tmp
+*.spthy.tmp
+*.pv.pv
+
+# ProVerif files that run_all.sh exports beside their sources.
+/models/denial_nsec3/nsec3.pv
+/models/rrsig_underflow/rrsig_underflow_vulnerable.pv
+/models/rrsig_underflow/rrsig_underflow_secure.pv
+
+# Expanded archived measurements; the archive and six final files stay tracked.
+/measurements/tld-census/2026-09-09/
+/measurements/tld-census/followup-2026-09-09/
+/measurements/tld-census/pilot-2026-09-09/
+/measurements/tld-census/final-2026-09-09/observations.json
+/measurements/tld-census/rechecked-*/
+
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+*.log
+*.swp
+*.swo
+*~
+.DS_Store
+.idea/
+.vscode/

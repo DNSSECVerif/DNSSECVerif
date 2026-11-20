@@ -1,0 +1,279 @@
+(*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: cd_bit_rucsec.pv
+ *
+ * CD-bit Cache Poisoning Attack Model (ProVerif)
+ * Property 7: Validation Segregation - CD-bit queries poison normal resolution
+ *)
+
+(* Types *)
+type ip.
+type domain.
+type qtype.
+type qid.
+type rcode.
+type dnskey.
+type signature.
+type cd_bit.
+
+(* Constants *)
+const victimcom: domain.
+const A: qtype.
+const DNSKEY: qtype.
+const CD0: cd_bit. (* validation required *)
+const CD1: cd_bit. (* validation disabled *)
+const NOERROR: rcode.
+const SERVFAIL: rcode.
+const NO_RRSIG: signature.
+const validation_failed: bitstring.
+const missing_signature: bitstring.
+const auth_a_value: bitstring.  (* Legitimate bitstring value returned by A record *)
+
+(* Constructors *)
+fun client_query(ip, domain, qtype, cd_bit, qid): bitstring.
+fun dns_response(rcode, bitstring): bitstring.
+fun dns_record(domain, qtype, bitstring, signature): bitstring.
+fun auth_query(ip, domain, qtype, cd_bit, qid): bitstring.
+
+(* Map dnskey to bitstring for use in dns_record value field *)
+fun dnskey_to_bitstring(dnskey): bitstring.
+
+(* Destructors for DNS responses *)
+fun get_rcode(bitstring): rcode
+reduc forall rcode_val: rcode, data: bitstring; 
+    get_rcode(dns_response(rcode_val, data)) = rcode_val.
+
+fun get_response_data(bitstring): bitstring
+reduc forall rcode_val: rcode, data: bitstring; 
+    get_response_data(dns_response(rcode_val, data)) = data.
+
+(* Destructors for DNS records *)
+fun get_record_domain(bitstring): domain
+reduc forall d: domain, t: qtype, val: bitstring, sig: signature; 
+    get_record_domain(dns_record(d, t, val, sig)) = d.
+
+fun get_record_type(bitstring): qtype
+reduc forall d: domain, t: qtype, val: bitstring, sig: signature; 
+    get_record_type(dns_record(d, t, val, sig)) = t.
+
+fun get_record_value(bitstring): bitstring
+reduc forall d: domain, t: qtype, val: bitstring, sig: signature; 
+    get_record_value(dns_record(d, t, val, sig)) = val.
+
+fun get_record_signature(bitstring): signature
+reduc forall d: domain, t: qtype, val: bitstring, sig: signature; 
+    get_record_signature(dns_record(d, t, val, sig)) = sig.
+
+(* Destructors for client queries *)
+fun get_client_query_ip(bitstring): ip
+reduc forall c_ip: ip, domain_val: domain, qtype_val: qtype, cd_val: cd_bit, query_id: qid; 
+    get_client_query_ip(client_query(c_ip, domain_val, qtype_val, cd_val, query_id)) = c_ip.
+
+fun get_client_query_domain(bitstring): domain
+reduc forall c_ip: ip, domain_val: domain, qtype_val: qtype, cd_val: cd_bit, query_id: qid; 
+    get_client_query_domain(client_query(c_ip, domain_val, qtype_val, cd_val, query_id)) = domain_val.
+
+fun get_client_query_type(bitstring): qtype
+reduc forall c_ip: ip, domain_val: domain, qtype_val: qtype, cd_val: cd_bit, query_id: qid; 
+    get_client_query_type(client_query(c_ip, domain_val, qtype_val, cd_val, query_id)) = qtype_val.
+
+fun get_client_query_cd(bitstring): cd_bit
+reduc forall c_ip: ip, domain_val: domain, qtype_val: qtype, cd_val: cd_bit, query_id: qid; 
+    get_client_query_cd(client_query(c_ip, domain_val, qtype_val, cd_val, query_id)) = cd_val.
+
+fun get_client_query_id(bitstring): qid
+reduc forall c_ip: ip, domain_val: domain, qtype_val: qtype, cd_val: cd_bit, query_id: qid; 
+    get_client_query_id(client_query(c_ip, domain_val, qtype_val, cd_val, query_id)) = query_id.
+
+(* Destructors for auth queries *)
+fun get_auth_query_ip(bitstring): ip
+reduc forall res_ip: ip, domain_val: domain, qtype_val: qtype, cd_val: cd_bit, query_id: qid; 
+    get_auth_query_ip(auth_query(res_ip, domain_val, qtype_val, cd_val, query_id)) = res_ip.
+
+fun get_auth_query_domain(bitstring): domain
+reduc forall res_ip: ip, domain_val: domain, qtype_val: qtype, cd_val: cd_bit, query_id: qid; 
+    get_auth_query_domain(auth_query(res_ip, domain_val, qtype_val, cd_val, query_id)) = domain_val.
+
+fun get_auth_query_type(bitstring): qtype
+reduc forall res_ip: ip, domain_val: domain, qtype_val: qtype, cd_val: cd_bit, query_id: qid; 
+    get_auth_query_type(auth_query(res_ip, domain_val, qtype_val, cd_val, query_id)) = qtype_val.
+
+fun get_auth_query_cd(bitstring): cd_bit
+reduc forall res_ip: ip, domain_val: domain, qtype_val: qtype, cd_val: cd_bit, query_id: qid; 
+    get_auth_query_cd(auth_query(res_ip, domain_val, qtype_val, cd_val, query_id)) = cd_val.
+
+fun get_auth_query_id(bitstring): qid
+reduc forall res_ip: ip, domain_val: domain, qtype_val: qtype, cd_val: cd_bit, query_id: qid; 
+    get_auth_query_id(auth_query(res_ip, domain_val, qtype_val, cd_val, query_id)) = query_id.
+
+(* Events for security properties *)
+event ClientQuery(ip, qid).
+event AttackStart(ip, qid).
+event AttackSuccessful(ip, domain).
+event QueryResolved(ip, bitstring).
+event ForgeDNSKEY(ip, domain, dnskey).
+event AttackComplete(ip, domain).
+event TroubleshootingQuery(ip, domain, qtype).
+event CacheUnvalidated(domain, qtype, bitstring, signature).
+event NormalQuery(ip, domain, qtype).
+event LookupDNSKEY(domain, qid).
+event ValidationFailure(domain, bitstring).
+event ValidationSuccess(domain, bitstring).
+event AuthQuery(domain, qtype, cd_bit).
+
+(* Channels *)
+channel c.
+free resolver_ch: channel.
+free auth_ch: channel.
+
+(* Security Queries *)
+
+(* Query : Attack reachability - attacker can cause SERVFAIL *)
+query client_ip: ip, domain_val: domain;
+    event(AttackSuccessful(client_ip, domain_val)).
+
+
+(* DNS Client Process - FIXED VERSION *)
+let Client(c_ip: ip, resolver_ip: ip) =
+    new qid: qid;
+    event ClientQuery(c_ip, qid);
+    
+    (* Send normal query for A record with CD=0 *)
+    out(resolver_ch, client_query(c_ip, victimcom, A, CD0, qid));
+    
+    (* Receive response - using destructors properly *)
+    in(c, response: bitstring);
+    let rcode_val = get_rcode(response) in
+    let answer = get_response_data(response) in
+    if rcode_val = SERVFAIL then
+        event AttackSuccessful(c_ip, victimcom)
+    else
+        event QueryResolved(c_ip, answer).
+
+(* Attacker Process *)
+let Attacker(a_ip: ip, resolver_ip: ip) =
+    new attack_qid: qid;
+    event AttackStart(a_ip, attack_qid);
+    
+    (* Phase 1: Send troubleshooting query with CD=1 *)
+    out(resolver_ch, client_query(a_ip, victimcom, DNSKEY, CD1, attack_qid));
+    
+    (* Phase 2: Intercept resolver's query to authoritative server *)
+    in(c, intercepted: bitstring);
+    let res_ip = get_auth_query_ip(intercepted) in
+    let domain_val = get_auth_query_domain(intercepted) in
+    let qtype_val = get_auth_query_type(intercepted) in
+    let cd_val = get_auth_query_cd(intercepted) in
+    let query_id = get_auth_query_id(intercepted) in
+    
+    (* Phase 3: Send forged response without RRSIG signature *)
+    new fake_dnskey: dnskey;
+    event ForgeDNSKEY(a_ip, domain_val, fake_dnskey);
+    out(c, dns_response(NOERROR, dns_record(domain_val, DNSKEY, dnskey_to_bitstring(fake_dnskey), NO_RRSIG)));
+    
+    event AttackComplete(a_ip, victimcom).
+
+(* DNS Resolver Process with RUCSEC vulnerability *)
+let Resolver(resolver_ip: ip, auth_server_ip: ip) =
+    new cache_ch: channel;
+    
+    in(resolver_ch, incoming: bitstring);
+    let client_ip = get_client_query_ip(incoming) in
+    let domain_val = get_client_query_domain(incoming) in
+    let qtype_val = get_client_query_type(incoming) in
+    let cd_val = get_client_query_cd(incoming) in
+    let query_id = get_client_query_id(incoming) in
+    
+    if cd_val = CD1 then
+        (* Troubleshooting query - bypass validation *)
+        event TroubleshootingQuery(client_ip, domain_val, qtype_val);
+        new auth_qid: qid;
+        
+        (* Forward to authoritative server *)
+        out(c, auth_query(resolver_ip, domain_val, qtype_val, cd_val, auth_qid));
+        
+        (* Receive response from authoritative server (could be forged) *)
+        in(c, auth_response: bitstring);
+        let rcode_val = get_rcode(auth_response) in
+        let record_data = get_response_data(auth_response) in
+        let rec_domain = get_record_domain(record_data) in
+        let rec_type = get_record_type(record_data) in
+        let rec_value = get_record_value(record_data) in
+        let sig_status = get_record_signature(record_data) in
+        
+        (* VULNERABILITY: Cache unvalidated data *)
+        event CacheUnvalidated(domain_val, rec_type, rec_value, sig_status);
+        
+        (* Store in cache *)
+        out(cache_ch, dns_record(rec_domain, rec_type, rec_value, sig_status));
+        
+        (* Return response to client *)
+        out(c, dns_response(rcode_val, record_data))
+        
+    else
+        (* Normal query - validation required (CD=0) *)
+        event NormalQuery(client_ip, domain_val, qtype_val);
+        
+        if qtype_val = A then
+            (* Need to validate A record using DNSKEY from cache *)
+            new dnskey_lookup_id: qid;
+            event LookupDNSKEY(domain_val, dnskey_lookup_id);
+            
+            (* Check cache for DNSKEY *)
+            in(cache_ch, cached_record: bitstring);
+            let cache_domain = get_record_domain(cached_record) in
+            let cache_type = get_record_type(cached_record) in
+            let cache_key = get_record_value(cached_record) in
+            let cache_sig = get_record_signature(cached_record) in
+            
+            if cache_sig = NO_RRSIG then
+                (* DNSSEC validation fails - no signature *)
+                event ValidationFailure(domain_val, missing_signature);
+                out(c, dns_response(SERVFAIL, validation_failed))
+            else
+                (* Normal validation path *)
+                event ValidationSuccess(domain_val, cache_key);
+                out(c, dns_response(NOERROR, dns_record(domain_val, A, cache_key, cache_sig))).
+
+(* Authoritative Server Process *)
+let AuthServer(auth_ip: ip) =
+    new real_dnskey: dnskey;
+    new dnskey_sig: signature;
+    
+    in(auth_ch, incoming: bitstring);
+    let resolver_ip = get_auth_query_ip(incoming) in
+    let domain_val = get_auth_query_domain(incoming) in
+    let qtype_val = get_auth_query_type(incoming) in
+    let cd_val = get_auth_query_cd(incoming) in
+    let query_id = get_auth_query_id(incoming) in
+    
+    event AuthQuery(domain_val, qtype_val, cd_val);
+    
+    if qtype_val = DNSKEY then
+        if cd_val = CD1 then
+            (* Troubleshooting query - return basic record *)
+            out(c, dns_response(NOERROR, dns_record(domain_val, DNSKEY, dnskey_to_bitstring(real_dnskey), NO_RRSIG)))
+        else
+            (* Normal query - return with RRSIG *)
+            out(c, dns_response(NOERROR, dns_record(domain_val, DNSKEY, dnskey_to_bitstring(real_dnskey), dnskey_sig)))
+    else if qtype_val = A then
+        out(c, dns_response(NOERROR, dns_record(domain_val, A, auth_a_value, dnskey_sig))).
+
+(* Main Process *)
+process
+    new resolver_ip: ip;
+    new auth_server_ip: ip;
+    
+    (
+        (* Multiple clients *)
+        (new c_ip: ip; Client(c_ip, resolver_ip)) |
+        
+        (* Attacker *)
+        (new a_ip: ip; Attacker(a_ip, resolver_ip)) |
+        
+        (* Resolver with vulnerability *)
+        !Resolver(resolver_ip, auth_server_ip) |
+        
+        (* Authoritative server *)
+        !AuthServer(auth_server_ip)
+    )

@@ -1,0 +1,268 @@
+/*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: nta_vulnerable.spthy
+ *
+ * NTA Cache Poisoning Vulnerability Model - VULNERABLE Implementation
+ * Property 22: Validation Preservation - NTA records used after expiry
+ *
+ * Models the interaction between RFC 7646 (NTA) and RFC 8198 (Aggressive NSEC Caching)
+ * VULNERABLE behavior: NSEC records cached during NTA are NOT validated after NTA expires
+ */
+
+theory NTA_Cache_Poisoning_Vulnerable
+begin
+
+builtins: hashing, signing
+
+functions: h/1
+
+/*
+ * ============================================================
+ * Rules using standard Tamarin multiset rewriting
+ * Semantically equivalent to ProVerif processes
+ * ============================================================
+ */
+
+// ============================================================
+// Key Setup and Initialization
+// Corresponds to: new zsk: key; let pk_zsk = pk(zsk) in ...
+// ============================================================
+
+rule Setup_Zone:
+    [ Fr(~zsk), Fr(~zone) ]
+  --[ SetupZone(~zone, pk(~zsk)) ]->
+    [ !ZSK(~zone, ~zsk)
+    , !ZonePK(~zone, pk(~zsk))
+    , Out(pk(~zsk))  // Publish DNSKEY: out(c, pk_zsk)
+    ]
+
+rule Setup_Resolver:
+    [ Fr(~resolver_ip), !ZonePK(zone, pk_zsk) ]
+  --[ SetupResolver(~resolver_ip, zone) ]->
+    [ !Resolver(~resolver_ip, zone, pk_zsk) ]
+
+// ============================================================
+// Administrator: NTA Configuration
+// Corresponds to: let Administrator(zone) = ...
+// ============================================================
+
+// event ConfigureNTA(zone); out(nta_channel, (NTA_ACTIVE, zone))
+rule Admin_Configure_NTA:
+    [ !Resolver(resolver_ip, zone, pk_zsk) ]
+  --[ ConfigureNTA(zone) ]->
+    [ NTA_Active(resolver_ip, zone) ]
+
+// in(c, trigger); event NTAExpired(zone)
+rule Admin_Expire_NTA:
+    [ NTA_Active(resolver_ip, zone), In(trigger) ]
+  --[ NTAExpired(zone) ]->
+    [ NTA_Expired(resolver_ip, zone) ]
+
+// ============================================================
+// Authoritative DNS Server
+// Corresponds to: let AuthoritativeServer(ns_ip, zsk, zone) = ...
+// ============================================================
+
+// Creates NSEC: nsec_record(zone, h((zone, aaa)), h((zone, zzz)))
+// Signs and outputs on public channel
+rule AuthServer_Send_NSEC:
+    let
+        nsec_owner = h(<zone, 'aaa'>)
+        nsec_next = h(<zone, 'zzz'>)
+        nsec = <'NSEC', zone, nsec_owner, nsec_next>
+        nsec_sig = sign(nsec, zsk)
+    in
+    [ !ZSK(zone, zsk)
+    , In(<'QUERY', qname, qid>)  // in(resolver_to_ns, ...)
+    ]
+  --[ AuthServerRecvQuery(zone, qname, qid)
+    , AuthServerSendNSEC(zone, qname, nsec)
+    ]->
+    // out(c, (qid, NXDOMAIN, nsec, nsec_sig, pk_zsk))
+    [ Out(<qid, 'NXDOMAIN', nsec, nsec_sig, pk(zsk)>) ]
+
+// ============================================================
+// Attacker Process (Man-in-the-Middle)
+// Corresponds to: let MitMAttacker(zone) = ...
+// ============================================================
+
+// Attacker intercepts query info: in(c, (qid, qname))
+// Creates fake NSEC and injects: out(c, (qid, NXDOMAIN, fake_nsec, INVALID_SIG, INVALID_SIG))
+rule Attacker_Inject_NSEC:
+    let
+        fake_nsec_owner = h(<zone, 'aaa'>)
+        fake_nsec_next = h(<zone, 'zzz'>)
+        fake_nsec = <'NSEC', zone, fake_nsec_owner, fake_nsec_next>
+    in
+    [ In(<qid, qname>)  // Intercept query info leaked by resolver
+    , !ZonePK(zone, pk_zsk)
+    ]
+  --[ AttackerInjectNSEC(zone, fake_nsec, qname, qid) ]->
+    // Cannot forge valid signature
+    [ Out(<qid, 'NXDOMAIN', fake_nsec, 'INVALID_SIG', 'INVALID_SIG'>) ]
+
+// ============================================================
+// Client Process
+// Corresponds to: let Client(client_ip, resolver_ip, qname) = ...
+// ============================================================
+
+rule Client_Send_Query:
+    [ Fr(~qid), Fr(~qname), !Resolver(resolver_ip, zone, pk_zsk) ]
+  --[ ClientSendQuery(~qname, ~qid) ]->
+    [ ClientPending(resolver_ip, ~qname, ~qid)
+    , ResolverQuery(resolver_ip, ~qname, ~qid)  // Query delivered to resolver
+    ]
+
+rule Client_Receive_NXDOMAIN:
+    [ ClientPending(resolver_ip, qname, qid)
+    , ResponseToClient(resolver_ip, qname, qid, 'NXDOMAIN')
+    ]
+  --[ ClientReceivedNXDOMAIN(qname) ]->
+    [ ]
+
+// ============================================================
+// DNS Resolver - VULNERABLE Implementation
+// Corresponds to: let ResolverVulnerable(resolver_ip, ns_ip, trust_anchor, zone) = ...
+// ============================================================
+
+// Resolver receives query from client
+rule Resolver_Receive_Query:
+    [ ResolverQuery(resolver_ip, qname, qid)
+    , !Resolver(resolver_ip, zone, pk_zsk)
+    ]
+  --[ ResolverRecvQuery(resolver_ip, qname, qid) ]->
+    [ ResolverProcessing(resolver_ip, zone, pk_zsk, qname, qid) ]
+
+// Option 1: Cache hit - synthesize from cached NSEC (VULNERABLE)
+// Corresponds to: in(cache_channel, (=CACHED_NSEC, cached_zone, cached_nsec))
+// VULNERABLE: No validation status check!
+rule Resolver_Synthesize_From_Cache:
+    [ ResolverProcessing(resolver_ip, zone, pk_zsk, qname, qid)
+    , CachedNSEC(resolver_ip, cached_zone, cached_nsec)  // Single cache, no validation status
+    ]
+  --[ SynthesizeFromCache(resolver_ip, qname, cached_nsec)
+    , LegitDomainDenied(qname)  // Attack success marker
+    ]->
+    [ CachedNSEC(resolver_ip, cached_zone, cached_nsec)  // Put back in cache
+    , ResponseToClient(resolver_ip, qname, qid, 'NXDOMAIN')
+    ]
+
+// Option 2a: Cache miss, forward query
+// Corresponds to: out(resolver_to_ns, ...); out(c, (qid, qname))
+rule Resolver_Forward_Query:
+    [ ResolverProcessing(resolver_ip, zone, pk_zsk, qname, qid) ]
+  --[ ResolverForwardQuery(resolver_ip, qname, qid) ]->
+    [ Out(<'QUERY', qname, qid>)  // Forward to auth server
+    , Out(<qid, qname>)           // Leak query info to attacker (out(c, (qid, qname)))
+    , ResolverWaitingResponse(resolver_ip, zone, pk_zsk, qname, qid)
+    ]
+
+// Option 2b-i: NTA active - cache without validation (VULNERABLE)
+// Corresponds to: in(nta_channel, (=NTA_ACTIVE, nta_zone)); ... out(cache_channel, ...)
+rule Resolver_Cache_During_NTA:
+    [ ResolverWaitingResponse(resolver_ip, zone, pk_zsk, qname, qid)
+    , NTA_Active(resolver_ip, zone)
+    , In(<qid, 'NXDOMAIN', nsec, sig, dnskey>)  // Response from network (server or attacker)
+    ]
+  --[ CacheNSECDuringNTA(resolver_ip, nsec, zone) ]->
+    // VULNERABLE: Cache without validation status
+    [ CachedNSEC(resolver_ip, zone, nsec)
+    , NTA_Active(resolver_ip, zone)  // Put NTA status back
+    , ResponseToClient(resolver_ip, qname, qid, 'NXDOMAIN')
+    ]
+
+// Option 2b-ii: No NTA - validate signature
+// Corresponds to: if verify(sig, dnskey, nsec) = true then if dnskey = trust_anchor then ...
+rule Resolver_Cache_Validated_NSEC:
+    [ ResolverWaitingResponse(resolver_ip, zone, pk_zsk, qname, qid)
+    , In(<qid, 'NXDOMAIN', nsec, sig, pk_zsk>)  // Response with matching trust anchor
+    ]
+  --[ CacheValidatedNSEC(resolver_ip, nsec)
+    , Eq(verify(sig, nsec, pk_zsk), true)  // Signature must be valid
+    ]->
+    // Still no validation status in vulnerable implementation
+    [ CachedNSEC(resolver_ip, zone, nsec)
+    , ResponseToClient(resolver_ip, qname, qid, 'NXDOMAIN')
+    ]
+
+// Option 2b-iii: Invalid signature - reject
+rule Resolver_Reject_Invalid_Sig:
+    [ ResolverWaitingResponse(resolver_ip, zone, pk_zsk, qname, qid)
+    , In(<qid, 'NXDOMAIN', nsec, sig, dnskey>)
+    ]
+  --[ RejectInvalidSig(resolver_ip, nsec)
+    , Neq(verify(sig, nsec, dnskey), true)  // Signature is invalid
+    ]->
+    [ ResponseToClient(resolver_ip, qname, qid, 'SERVFAIL') ]
+
+// ============================================================
+// Restrictions
+// ============================================================
+
+restriction Equality:
+    "All x y #i. Eq(x,y) @i ==> x = y"
+
+restriction Inequality:
+    "All x y #i. Neq(x,y) @i ==> not(x = y)"
+
+// ============================================================
+// Security Properties (Lemmas)
+// Corresponds to ProVerif queries
+// ============================================================
+
+/*
+ * query qname: qname_t; event(LegitDomainDenied(qname)).
+ * For VULNERABLE implementation: should find attack trace
+ */
+lemma attack_reachable:
+    exists-trace
+    "Ex qname #t. LegitDomainDenied(qname) @ #t"
+
+/*
+ * query zone, nsec, qname, qid;
+ *     event(LegitDomainDenied(qname)) && event(AttackerInjectNSEC(zone, nsec, qname, qid)).
+ * Full attack sequence
+ */
+lemma full_attack_sequence:
+    exists-trace
+    "Ex zone nsec qname qid #t1 #t2.
+        AttackerInjectNSEC(zone, nsec, qname, qid) @ #t1 &
+        LegitDomainDenied(qname) @ #t2 &
+        #t1 < #t2"
+
+/*
+ * query resolver, nsec, zone; event(CacheNSECDuringNTA(resolver, nsec, zone)).
+ * NTA bypass is reachable
+ */
+lemma nta_bypass_exists:
+    exists-trace
+    "Ex resolver nsec zone #i.
+        CacheNSECDuringNTA(resolver, nsec, zone) @ #i"
+
+/*
+ * query resolver, qname, nsec; event(SynthesizeFromCache(resolver, qname, nsec)).
+ * Cache synthesis is reachable
+ */
+lemma cache_synthesis_exists:
+    exists-trace
+    "Ex resolver qname nsec #i.
+        SynthesizeFromCache(resolver, qname, nsec) @ #i"
+
+/*
+ * Attack persistence: poisoned cache entry persists after NTA expires
+ * Complete attack flow matching ProVerif semantics
+ */
+lemma attack_with_nta_expiry:
+    exists-trace
+    "Ex zone nsec qname qid resolver #t1 #t2 #t3 #t4 #t5.
+        ConfigureNTA(zone) @ #t1 &
+        AttackerInjectNSEC(zone, nsec, qname, qid) @ #t2 &
+        CacheNSECDuringNTA(resolver, nsec, zone) @ #t3 &
+        NTAExpired(zone) @ #t4 &
+        LegitDomainDenied(qname) @ #t5 &
+        #t1 < #t2 &
+        #t2 < #t3 &
+        #t3 < #t4 &
+        #t4 < #t5"
+
+end

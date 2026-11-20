@@ -1,0 +1,227 @@
+/*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: cd_bit_rucsec.spthy
+ *
+ * CD-bit Cache Poisoning Attack Model (Known Attack Validation)
+ * Property 7: Validation Segregation - CD-bit queries poison normal resolution
+ *
+ * RUCSEC Attack: CD=1 (Checking Disabled) queries allow unvalidated data
+ * into the shared cache, poisoning subsequent CD=0 queries that require
+ * DNSSEC validation.
+ *
+ * Attack flow:
+ * 1. Attacker sends CD=1 DNSKEY query to resolver
+ * 2. Resolver forwards query on public channel
+ * 3. Dolev-Yao adversary intercepts and injects forged DNSKEY (NO_RRSIG)
+ * 4. Resolver caches unvalidated response (CD=1 bypasses validation)
+ * 5. Legitimate client sends CD=0 A query
+ * 6. Resolver finds poisoned DNSKEY in cache -> validation fails -> SERVFAIL
+ */
+
+theory RUCSEC_Attack
+begin
+
+builtins: signing, hashing
+
+/*============================================================================
+ * SECTION 1: DNS Client
+ *
+ * Sends normal queries with CD=0 (validation required).
+ * If the resolver returns SERVFAIL, the attack succeeded.
+ *============================================================================*/
+
+let Client(~c_ip, ~resolver_ip) =
+    new ~qid;
+    event ClientQuery(~c_ip, ~qid);
+
+    // Send normal query for A record with CD=0 (validation required)
+    out(~resolver_ip, <~c_ip, 'victimcom', 'A', 'CD0', ~qid>);
+
+    // Receive response
+    in(~c_ip, <rcode, answer>);
+    if rcode = 'SERVFAIL' then
+        event AttackSuccessful(~c_ip, 'victimcom')
+    else
+        event QueryResolved(~c_ip, answer)
+
+
+/*============================================================================
+ * SECTION 2: Attacker
+ *
+ * Legitimate client that sends CD=1 queries to trigger cache poisoning.
+ * The Dolev-Yao adversary (built into Tamarin) handles the MitM injection
+ * of forged DNSKEY responses on the public channel.
+ *============================================================================*/
+
+let Attacker(~a_ip, ~resolver_ip) =
+    new ~attack_qid;
+    event AttackStart(~a_ip, ~attack_qid);
+
+    // Send troubleshooting query with CD=1 (validation disabled)
+    out(~resolver_ip, <~a_ip, 'victimcom', 'DNSKEY', 'CD1', ~attack_qid>);
+
+    // Receive response (don't care about content)
+    in(~a_ip, <rcode, answer>);
+    event AttackComplete(~a_ip, 'victimcom')
+
+
+/*============================================================================
+ * SECTION 3: DNS Resolver with RUCSEC vulnerability
+ *
+ * Uses SAPIC+ state (insert/lookup) for shared cache.
+ * VULNERABILITY: CD=1 and CD=0 queries share the same cache without
+ * segregation by validation status.
+ *============================================================================*/
+
+let Resolver(~resolver_ip) =
+    !(
+        in(~resolver_ip, <client_ip, domain, qtype, cd_bit, query_id>);
+        (
+            if cd_bit = 'CD1' then
+            (
+                // CD=1: Troubleshooting query - bypass validation
+                event TroubleshootingQuery(client_ip, domain, qtype);
+
+                // Forward query on public channel (Dolev-Yao adversary can intercept)
+                out(<'query', domain, qtype>);
+                in(<'response', resp_domain, rec_type, rec_value, sig_status>);
+                if resp_domain = domain then
+                (
+                    // VULNERABILITY: Cache data without validation check
+                    // No segregation between validated and unvalidated entries
+                    event CacheUnvalidated(domain, rec_type, rec_value, sig_status);
+                    insert <'cache', domain, rec_type>, <rec_value, sig_status>;
+
+                    // Return response to client
+                    out(client_ip, <'NOERROR', <domain, rec_type, rec_value, sig_status>>)
+                )
+            )
+            else
+            (
+                // CD=0: Normal query - validation required
+                event NormalQuery(client_ip, domain, qtype);
+
+                if qtype = 'A' then
+                (
+                    // Check shared cache for DNSKEY (may contain unvalidated data from CD=1)
+                    lookup <'cache', domain, 'DNSKEY'> as cached in
+                    (
+                        let <cache_key, cache_sig> = cached in
+                        event LookupDNSKEY(domain, cache_key);
+
+                        if cache_sig = 'NO_RRSIG' then
+                        (
+                            // Cached DNSKEY has no signature -> validation fails
+                            event ValidationFailure(domain, 'missing_signature');
+                            out(client_ip, <'SERVFAIL', 'validation_failed'>)
+                        )
+                        else
+                        (
+                            // Cached DNSKEY has valid signature -> success
+                            event ValidationSuccess(domain, cache_key);
+                            out(client_ip, <'NOERROR', <domain, 'A', '1234'>>)
+                        )
+                    )
+                    else
+                    (
+                        // No DNSKEY in cache - query authoritative server
+                        out(<'query', domain, 'DNSKEY'>);
+                        in(<'response', resp_domain2, rec_type, rec_value, sig_status>);
+                        if resp_domain2 = domain then
+                        (
+                            if sig_status = 'NO_RRSIG' then
+                            (
+                                // No signature -> reject (proper CD=0 behavior)
+                                event ValidationFailure(domain, 'missing_signature');
+                                out(client_ip, <'SERVFAIL', 'validation_failed'>)
+                            )
+                            else
+                            (
+                                // Valid -> cache and return
+                                insert <'cache', domain, 'DNSKEY'>, <rec_value, sig_status>;
+                                event ValidationSuccess(domain, rec_value);
+                                out(client_ip, <'NOERROR', <domain, 'A', '1234'>>)
+                            )
+                        )
+                    )
+                )
+            )
+        )
+    )
+
+
+/*============================================================================
+ * SECTION 4: Authoritative Server
+ *
+ * Serves legitimate DNSSEC records with valid signatures.
+ * Responses go on public channel, so the Dolev-Yao adversary can race.
+ *============================================================================*/
+
+let AuthServer(~real_dnskey, ~dnskey_sig) =
+    !(
+        in(<'query', auth_domain, auth_qtype>);
+        event AuthQuery(auth_domain, auth_qtype);
+        if auth_qtype = 'DNSKEY' then
+            out(<'response', auth_domain, 'DNSKEY', ~real_dnskey, ~dnskey_sig>)
+        else if auth_qtype = 'A' then
+            out(<'response', auth_domain, 'A', '1234', ~dnskey_sig>)
+    )
+
+
+/*============================================================================
+ * SECTION 5: Main Process
+ *============================================================================*/
+
+process:
+    new ~resolver_ip;
+    new ~real_dnskey;
+    new ~dnskey_sig;
+
+    !(new ~c_ip; Client(~c_ip, ~resolver_ip)) |
+    !(new ~a_ip; Attacker(~a_ip, ~resolver_ip)) |
+    Resolver(~resolver_ip) |
+    AuthServer(~real_dnskey, ~dnskey_sig)
+
+
+/*============================================================================
+ * SECTION 6: Restrictions
+ *============================================================================*/
+
+restriction UniqueAttackID:
+    "All x y #i #j. AttackStart(x, y) @#i & AttackStart(x, y) @#j ==> #i = #j"
+
+
+/*============================================================================
+ * SECTION 7: Security Properties (Lemmas)
+ *============================================================================*/
+
+// Attack reachability - attacker can cause SERVFAIL for normal client
+lemma attack_reachable:
+    exists-trace
+    "Ex client domain #i.
+        AttackSuccessful(client, domain) @#i"
+
+// Cache poisoning - unvalidated data gets cached via CD=1 path
+lemma cache_poisoning:
+    exists-trace
+    "Ex domain qtype value sig_status #i.
+        CacheUnvalidated(domain, qtype, value, sig_status) @#i"
+
+// Full attack: CD=1 cache poisoning leads to CD=0 validation failure
+lemma full_attack_sequence:
+    exists-trace
+    "Ex domain value sig_status reason #i #j.
+        CacheUnvalidated(domain, 'DNSKEY', value, sig_status) @#i &
+        ValidationFailure(domain, reason) @#j &
+        #i < #j"
+
+// Validation segregation violation: CD=1 poisoning causes CD=0 SERVFAIL
+lemma validation_segregation_violated:
+    exists-trace
+    "Ex a_ip a_qid c_ip domain value #i #j #k.
+        AttackStart(a_ip, a_qid) @#i &
+        CacheUnvalidated(domain, 'DNSKEY', value, 'NO_RRSIG') @#j &
+        AttackSuccessful(c_ip, domain) @#k &
+        #i < #j & #j < #k"
+
+end

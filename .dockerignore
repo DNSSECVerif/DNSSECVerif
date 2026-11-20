@@ -1,0 +1,20 @@
+# Allow only the formal-model build inputs into the Docker context.
+**
+!Dockerfile
+!.dockerignore
+!models/
+!models/**
+!run_all.sh
+!docker-entrypoint.sh
+!README.md
+!MODEL_INDEX.md
+!LICENSE
+!NOTICE
+
+# Do not send generated translations, results, or measurement archives.
+models/denial_nsec3/nsec3.pv
+models/rrsig_underflow/rrsig_underflow_vulnerable.pv
+models/rrsig_underflow/rrsig_underflow_secure.pv
+**/*.pv.pv
+**/*.tmp
+**/.DS_Store

@@ -1,0 +1,331 @@
+/*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: nsec.spthy
+ *
+ * NSEC denial-of-existence protocol model (SAPIC+/Tamarin)
+ * Properties 15-17: NSEC Executability, Domain Secrecy, Result Authentication
+ */
+
+ theory NSEC
+ begin
+
+ builtins: hashing, natural-numbers, signing
+ functions: h/1, natural/1, sign/2, verify/3, pk/1 //the natural function can change bitstring to natural number
+
+
+// this is the process for name server
+// the server can be root server, TLD server, SLD server
+ let Server(~serverIP, %plainName:nat, %ownerName1:nat, ~ownerIP1,
+    %ownerName2:nat, ~ownerIP2, %ownerName3:nat, ~ownerIP3, %label,
+    ~secretKey) =
+    // newly create the ownername, the ownerIP of three records
+
+    let zoneRecords = <%ownerName1, %ownerName2, %ownerName3> in
+    let wildcard = 'wildcard' in
+    event InitiateServer(~serverIP);
+    event ZonehasRecords(~serverIP,zoneRecords);
+
+    // can process the query from resolver multiple times
+    !(
+        // out(<resolverIP, rootIP, %rootQueryName:nat>);
+        in(<resolverIP, recServerIP, %queryName:nat>);
+        if recServerIP = ~serverIP then
+        (
+            event ServerReceiveQuery(~serverIP, resolverIP, %queryName);
+            let %existLabel = %label %+ %1 in
+            if %ownerName1= %queryName then
+            (
+                let msg = <~serverIP,resolverIP,~ownerIP1,%ownerName1,%ownerName1,%existLabel> in
+                let sig = sign(msg, ~secretKey) in
+                out(<~serverIP,resolverIP,~ownerIP1,%ownerName1,%ownerName1,%existLabel, sig>);
+                event QueryNameExist(~serverIP, resolverIP, %queryName);
+                event ServerSendResp(~serverIP, resolverIP, ~ownerIP1, %ownerName1, %ownerName1, %existLabel)
+            )
+            else if %ownerName2= %queryName then
+            (
+                let msg = <~serverIP, resolverIP, ~ownerIP2,%ownerName2, %ownerName2, %existLabel> in
+                let sig = sign(msg, ~secretKey) in
+                out(<~serverIP, resolverIP, ~ownerIP2,%ownerName2, %ownerName2, %existLabel, sig>);
+                event QueryNameExist(~serverIP, resolverIP, %queryName);
+                event ServerSendResp(~serverIP, resolverIP, ~ownerIP2, %ownerName2, %ownerName2, %existLabel)
+            )
+            else if  %ownerName3= %queryName then
+            (
+                let msg = <~serverIP, resolverIP, ~ownerIP3,%ownerName3, %ownerName3, %existLabel> in
+                let sig = sign(msg, ~secretKey) in
+                out(<~serverIP, resolverIP, ~ownerIP3,%ownerName3, %ownerName3, %existLabel, sig>);
+                event QueryNameExist(~serverIP, resolverIP, %queryName);
+                event ServerSendResp(~serverIP, resolverIP, ~ownerIP3, %ownerName3, %ownerName3, %existLabel)
+            )
+            else
+            (
+                event QueryNameNonExist(~serverIP, resolverIP, %queryName);
+                // find the closest enclosing NSEC range
+                if %ownerName3 << %queryName then
+                (
+                    let msg = <~serverIP, resolverIP, wildcard, %ownerName3, %plainName, %label> in
+                    let sig = sign(msg, ~secretKey) in
+                    out(<~serverIP, resolverIP, wildcard, %ownerName3, %plainName, %label, sig>);
+                    event ServerSendResp(~serverIP, resolverIP, wildcard, %ownerName3, %plainName, %label)
+                )
+                else if %ownerName2 << %queryName then
+                (
+                    let msg = <~serverIP, resolverIP, wildcard, %ownerName2, %ownerName3, %label> in
+                    let sig = sign(msg, ~secretKey) in
+                    out(<~serverIP, resolverIP, wildcard, %ownerName2, %ownerName3, %label, sig>);
+                    event ServerSendResp(~serverIP, resolverIP, wildcard, %ownerName2, %ownerName3, %label)
+                )
+                else if %ownerName1 << %queryName then
+                (
+                    let msg = <~serverIP, resolverIP, wildcard, %ownerName1, %ownerName2, %label> in
+                    let sig = sign(msg, ~secretKey) in
+                    out(<~serverIP, resolverIP, wildcard, %ownerName1, %ownerName2, %label, sig>);
+                    event ServerSendResp(~serverIP, resolverIP, wildcard, %ownerName1, %ownerName2, %label)
+                )
+                else
+                (
+                    let msg = <~serverIP, resolverIP, wildcard, %plainName, %ownerName1, %label> in
+                    let sig = sign(msg, ~secretKey) in
+                    out(<~serverIP, resolverIP, wildcard, %plainName, %ownerName1, %label, sig>);
+                    event ServerSendResp(~serverIP, resolverIP, wildcard, %plainName, %ownerName1, %label)
+                )
+            )
+        )
+
+
+    )
+
+
+// modify the resolver to handle three-layers request
+// a.example.com
+// change the previous resolverID to resolverIP, input the IP of resolver and rootserver
+// ~resolverIP
+// add public key of them
+let Resolver(~resolIP, ~rootIP, %rootQueryName:nat, %tldQueryName:nat, %sldQueryName:nat,
+    pubKey1, pubKey2, pubKey3) =
+    (
+        out(<~resolIP, ~rootIP, %rootQueryName:nat>);
+        event ResolverSendRootQuery(~resolIP, %rootQueryName);
+        event InitiateResolver(~resolIP);
+
+        // the following label data field
+        let %rootLabel:nat = %1 in
+        let %tldLabel:nat = %rootLabel %+ %1 in
+        let %sldLabel:nat = %tldLabel %+ %1 in
+        // receive the answer from the rootIP
+        in(<recRootIP, recResolverIP,rootResult,
+            %rootName1:nat,%rootName2:nat, %recLabel1, signature1>);
+        let m1 = <recRootIP, recResolverIP,rootResult,
+        %rootName1:nat,%rootName2:nat, %recLabel1> in
+
+        if <recRootIP, recResolverIP, verify(signature1, m1, pubKey1)> = <~rootIP, ~resolIP, true> then
+        (
+            // for integrity and authentication properties
+            event ResolverReceiveResult(recRootIP, recResolverIP, rootResult, %rootName1, %rootName2, %recLabel1);
+            if <%rootName1, %recLabel1>=<%rootQueryName, %rootLabel %+ %1> then
+            (
+                // the resolver get the rootresult is the ip of the next layer
+                event ResolverGotExist(recResolverIP,%rootQueryName,rootResult);
+                let TLDIP = rootResult in
+                // send the query to the TLD server
+                out(<~resolIP, TLDIP, %tldQueryName>);
+                event ResolverSendTLDQuery(~resolIP, %tldQueryName);
+
+                // receive the answer from the TLDIP
+                in(<recTldIP, recResolverIP2, TLDResult,
+                    %TLDName1:nat, %TLDName2:nat, %recLabel2, signature2>);
+                // verify the signature
+                let m2 = <recTldIP, recResolverIP2, TLDResult,
+                %TLDName1:nat, %TLDName2:nat, %recLabel2> in
+
+                if <recTldIP, recResolverIP2, verify(signature2,m2,pubKey2)> = <TLDIP, ~resolIP, true> then
+                (
+
+                    event ResolverReceiveResult(recTldIP, recResolverIP2, TLDResult, %TLDName1, %TLDName2, %recLabel2);
+                    if <%TLDName1, %recLabel2> = <%tldQueryName, %tldLabel %+ %1> then
+                    (
+                        // the resolver get the TLDResult is the ip of the next layer
+                        event ResolverGotExist(recResolverIP2,%tldQueryName,TLDResult);
+                        let SLDIP = TLDResult in
+                        // send the query to the SLD server
+                        out(<~resolIP, SLDIP, %sldQueryName>);
+                        event ResolverSendSLDQuery(~resolIP, %sldQueryName);
+
+                        // receive the answer from the SLDIP
+                        in(<recSldIP, recResolverIP3, SLDResult,
+                            %SLDName1:nat, %SLDName2:nat, %recLabel3, signature3>);
+                        // verify the signature
+                        let m3 = <recSldIP, recResolverIP3, SLDResult,
+                        %SLDName1:nat, %SLDName2:nat, %recLabel3> in
+                        if <recSldIP, recResolverIP3, verify(signature3,m3,pubKey3)> = <SLDIP, ~resolIP,true> then
+                        (
+
+                            // for integrity and authentication property
+                            event ResolverReceiveResult(recSldIP, recResolverIP3, SLDResult, %SLDName1, %SLDName2, %recLabel3);
+
+                            if <%SLDName1, %recLabel3> = <%sldQueryName, %sldLabel %+ %1> then
+                            (
+                                // the resolver get the SLDResult is the ip of the next layer
+                                event ResolverGotExist(recResolverIP3,%sldQueryName,SLDResult)
+                            )
+                            // Non-existence: verify NSEC range (both lower AND upper bound)
+                            else if %SLDName1<<%sldQueryName then
+                            (
+                                if %sldQueryName << %SLDName2 then
+                                (
+                                    if <SLDResult, %recLabel3>= <'wildcard', %sldLabel> then
+                                        event ResolverGotNonExist(recResolverIP3,%sldQueryName)
+                                )
+                            )
+                        )
+
+                    )
+                    // Non-existence at TLD: verify NSEC range (both bounds)
+                    else if %TLDName1<<%tldQueryName then
+                    (
+                        if %tldQueryName << %TLDName2 then
+                        (
+                            if <TLDResult, %recLabel2> = <'wildcard', %tldLabel> then
+                                event ResolverGotNonExist(recResolverIP2,%tldQueryName)
+                        )
+                    )
+                )
+            )
+            // Non-existence at root: verify NSEC range (both bounds)
+            else if %rootName1<<%rootQueryName then
+            (
+                if %rootQueryName << %rootName2 then
+                (
+                    if <rootResult, %recLabel1> = <'wildcard', %rootLabel> then
+                        event ResolverGotNonExist(recResolverIP,%rootQueryName)
+                )
+            )
+        )
+    )
+
+
+
+process:
+let %plainName:nat = %1 in
+// set the owner name in several layer's servers
+// ownerName1=2, ownerName2=3, ownerName3=5
+let %ownerName1:nat = %plainName:nat %+ %1 in
+let %ownerName2:nat = %ownerName1:nat %+ %1 in
+let %ownerName3:nat = %ownerName2:nat %+ %1 %+ %1 in
+
+// Query names:
+// existQuery=2 (matches ownerName1), nonExistQuery=4 (between ownerName2=3 and ownerName3=5)
+let %existQuery:nat = %1 %+ %1 in
+let %nonExistQuery:nat = %1 %+ %1 %+ %1 %+ %1 in
+
+// create IPs
+new ~resolIP1;
+new ~resolIP2;
+new ~rootIP;
+new ~rootNameIP1;
+new ~rootNameIP2;
+new ~rootNameIP3;
+new ~tldNameIP1;
+new ~tldNameIP2;
+new ~tldNameIP3;
+new ~sldNameIP1;
+new ~sldNameIP2;
+new ~sldNameIP3;
+
+// create the secret keys and public keys for signing
+new ~secretKey1;
+let pubKey1 = pk(~secretKey1) in
+new ~secretKey2;
+let pubKey2 = pk(~secretKey2) in
+new ~secretKey3;
+let pubKey3 = pk(~secretKey3) in
+
+// adding label field (use p_ prefix to avoid clash with Resolver's internal labels)
+let %pRootLabel:nat = %1 in
+let %pTldLabel:nat = %pRootLabel %+ %1 in
+let %pSldLabel:nat = %pTldLabel %+ %1 in
+
+// Resolver 1: all queries exist (for ExistExecutability)
+Resolver(~resolIP1, ~rootIP, %existQuery:nat, %existQuery:nat, %existQuery:nat,
+    pubKey1, pubKey2, pubKey3)
+||
+// Resolver 2: root and TLD exist, SLD query does not exist (for NonExistExecutability)
+Resolver(~resolIP2, ~rootIP, %existQuery:nat, %existQuery:nat, %nonExistQuery:nat,
+    pubKey1, pubKey2, pubKey3)
+||
+Server(~rootIP, %plainName:nat, %ownerName1:nat, ~rootNameIP1, // the root server
+    %ownerName2:nat, ~rootNameIP2, %ownerName3:nat, ~rootNameIP3, %pRootLabel:nat,
+    ~secretKey1)
+||
+Server(~rootNameIP1, %plainName:nat, %ownerName1:nat, ~tldNameIP1, // the tld server
+    %ownerName2:nat, ~tldNameIP2, %ownerName3:nat, ~tldNameIP3, %pTldLabel:nat,
+    ~secretKey2)
+||
+Server(~tldNameIP1, %plainName:nat, %ownerName1:nat, ~sldNameIP1, // the sld server
+     %ownerName2:nat, ~sldNameIP2, %ownerName3:nat, ~sldNameIP3, %pSldLabel:nat,
+     ~secretKey3)
+
+
+
+
+// Property 15: Existence Executability
+// Query for existing name (2) should succeed at root level
+lemma ExistExecutability:
+exists-trace
+"
+Ex rootIP resolverIP rootQueryName #i1 #i2.
+ResolverSendRootQuery(resolverIP, rootQueryName) @ #i1
+&
+QueryNameExist(rootIP, resolverIP, rootQueryName) @ #i2
+"
+
+// Property 15b: Non-Existence Executability
+// Query for non-existing name (4) should produce a non-existence proof
+lemma NonExistExecutability:
+exists-trace
+"
+Ex resolverIP queryName #i1 #i2.
+ResolverSendSLDQuery(resolverIP, queryName) @ #i1 &
+ResolverGotNonExist(resolverIP, queryName) @ #i2
+"
+
+
+// Property 16: Domain Secrecy (NSEC) - EXPECTED FALSIFIED
+// NSEC sends owner names in plaintext, enabling zone walking.
+// In this model, owner names are natural numbers (publicly computable),
+// so secrecy is trivially falsified. This correctly reflects that NSEC
+// does not protect domain name confidentiality (RFC 4034 Section 4).
+// For a more detailed zone walking model, see nsec3.spthy which uses
+// fresh names and demonstrates that NSEC3 hashing provides secrecy.
+
+
+// Property 17: Result Authentication (Integrity)
+// If resolver receives a response, it must have been sent by the server
+lemma IntegrityAll:
+"
+    All serverIP resolverIP result curDomain nextDomain label #i.
+    ResolverReceiveResult(serverIP, resolverIP, result, curDomain, nextDomain, label) @ #i
+    ==>
+    (Ex #j. ServerSendResp(serverIP, resolverIP, result, curDomain, nextDomain, label) @ #j
+        & j<i)
+"
+
+
+// the identity of server
+// verified
+lemma distinctServer:
+"
+    All serverIP #i #j.
+    InitiateServer(serverIP) @ #i & InitiateServer(serverIP) @ #j
+    ==> #i=#j
+"
+
+// the identity of resolver
+// verified (each resolver has a unique IP)
+lemma distinctResolver:
+"
+    All resolIP #i #j.
+    InitiateResolver(resolIP) @ #i & InitiateResolver(resolIP) @ #j
+    ==> #i=#j
+"
+end

@@ -1,0 +1,291 @@
+/*
+ * DNSSECVerif (ACM CCS 2026)
+ * Model: nta_secure.spthy
+ *
+ * NTA Cache Poisoning Vulnerability Model - SECURE Implementation
+ * Property 22 mitigation: Validation status tracked, unvalidated NSEC rejected
+ *
+ * Models correct behavior (Unbound/Knot Resolver style):
+ * - NSEC records cached WITH validation status
+ * - Only validated NSEC can be used for aggressive caching
+ */
+
+theory NTA_Cache_Poisoning_Secure
+begin
+
+builtins: hashing, signing
+
+functions: h/1
+
+/*
+ * ============================================================
+ * Rules using standard Tamarin multiset rewriting
+ * Semantically equivalent to ProVerif processes
+ * ============================================================
+ */
+
+// ============================================================
+// Key Setup and Initialization
+// Corresponds to: new zsk: key; let pk_zsk = pk(zsk) in ...
+// ============================================================
+
+rule Setup_Zone:
+    [ Fr(~zsk), Fr(~zone) ]
+  --[ SetupZone(~zone, pk(~zsk)) ]->
+    [ !ZSK(~zone, ~zsk)
+    , !ZonePK(~zone, pk(~zsk))
+    , Out(pk(~zsk))  // Publish DNSKEY: out(c, pk_zsk)
+    ]
+
+rule Setup_Resolver:
+    [ Fr(~resolver_ip), !ZonePK(zone, pk_zsk) ]
+  --[ SetupResolver(~resolver_ip, zone) ]->
+    [ !Resolver(~resolver_ip, zone, pk_zsk) ]
+
+// ============================================================
+// Administrator: NTA Configuration
+// Corresponds to: let Administrator(zone) = ...
+// ============================================================
+
+// event ConfigureNTA(zone); out(nta_channel, (NTA_ACTIVE, zone))
+rule Admin_Configure_NTA:
+    [ !Resolver(resolver_ip, zone, pk_zsk) ]
+  --[ ConfigureNTA(zone) ]->
+    [ NTA_Active(resolver_ip, zone) ]
+
+// in(c, trigger); event NTAExpired(zone)
+rule Admin_Expire_NTA:
+    [ NTA_Active(resolver_ip, zone), In(trigger) ]
+  --[ NTAExpired(zone) ]->
+    [ NTA_Expired(resolver_ip, zone) ]
+
+// ============================================================
+// Authoritative DNS Server
+// Corresponds to: let AuthoritativeServer(ns_ip, zsk, zone) = ...
+// ============================================================
+
+// Creates NSEC: nsec_record(zone, h((zone, aaa)), h((zone, zzz)))
+// Signs and outputs on public channel
+rule AuthServer_Send_NSEC:
+    let
+        nsec_owner = h(<zone, 'aaa'>)
+        nsec_next = h(<zone, 'zzz'>)
+        nsec = <'NSEC', zone, nsec_owner, nsec_next>
+        nsec_sig = sign(nsec, zsk)
+    in
+    [ !ZSK(zone, zsk)
+    , In(<'QUERY', qname, qid>)  // in(resolver_to_ns, ...)
+    ]
+  --[ AuthServerRecvQuery(zone, qname, qid)
+    , AuthServerSendNSEC(zone, qname, nsec)
+    ]->
+    // out(c, (qid, NXDOMAIN, nsec, nsec_sig, pk_zsk))
+    [ Out(<qid, 'NXDOMAIN', nsec, nsec_sig, pk(zsk)>) ]
+
+// ============================================================
+// Attacker Process (Man-in-the-Middle)
+// Corresponds to: let MitMAttacker(zone) = ...
+// ============================================================
+
+// Attacker intercepts query info: in(c, (qid, qname))
+// Creates fake NSEC and injects: out(c, (qid, NXDOMAIN, fake_nsec, INVALID_SIG, INVALID_SIG))
+rule Attacker_Inject_NSEC:
+    let
+        fake_nsec_owner = h(<zone, 'aaa'>)
+        fake_nsec_next = h(<zone, 'zzz'>)
+        fake_nsec = <'NSEC', zone, fake_nsec_owner, fake_nsec_next>
+    in
+    [ In(<qid, qname>)  // Intercept query info leaked by resolver
+    , !ZonePK(zone, pk_zsk)
+    ]
+  --[ AttackerInjectNSEC(zone, fake_nsec, qname, qid) ]->
+    // Cannot forge valid signature
+    [ Out(<qid, 'NXDOMAIN', fake_nsec, 'INVALID_SIG', 'INVALID_SIG'>) ]
+
+// ============================================================
+// Client Process
+// Corresponds to: let Client(client_ip, resolver_ip, qname) = ...
+// ============================================================
+
+rule Client_Send_Query:
+    [ Fr(~qid), Fr(~qname), !Resolver(resolver_ip, zone, pk_zsk) ]
+  --[ ClientSendQuery(~qname, ~qid) ]->
+    [ ClientPending(resolver_ip, ~qname, ~qid)
+    , ResolverQuery(resolver_ip, ~qname, ~qid)  // Query delivered to resolver
+    ]
+
+rule Client_Receive_NXDOMAIN:
+    [ ClientPending(resolver_ip, qname, qid)
+    , ResponseToClient(resolver_ip, qname, qid, 'NXDOMAIN')
+    ]
+  --[ ClientReceivedNXDOMAIN(qname) ]->
+    [ ]
+
+// ============================================================
+// DNS Resolver - SECURE Implementation
+// Corresponds to: let ResolverSecure(resolver_ip, ns_ip, trust_anchor, zone) = ...
+// ============================================================
+
+// Resolver receives query from client
+rule Resolver_Receive_Query:
+    [ ResolverQuery(resolver_ip, qname, qid)
+    , !Resolver(resolver_ip, zone, pk_zsk)
+    ]
+  --[ ResolverRecvQuery(resolver_ip, qname, qid) ]->
+    [ ResolverProcessing(resolver_ip, zone, pk_zsk, qname, qid) ]
+
+// Option 1: Cache hit in VALIDATED cache only (SECURE)
+// Corresponds to: in(validated_cache, (=VALIDATED_NSEC, cached_zone, cached_nsec))
+// SECURE: Only uses validated cache for synthesis!
+rule Resolver_Synthesize_From_Validated_Cache:
+    [ ResolverProcessing(resolver_ip, zone, pk_zsk, qname, qid)
+    , ValidatedCachedNSEC(resolver_ip, cached_zone, cached_nsec)  // ONLY from validated cache
+    ]
+  --[ SynthesizeFromValidatedCache(resolver_ip, qname, cached_nsec) ]->
+    [ ValidatedCachedNSEC(resolver_ip, cached_zone, cached_nsec)  // Put back in validated cache
+    , ResponseToClient(resolver_ip, qname, qid, 'NXDOMAIN')
+    ]
+
+// NOTE: There is NO rule to synthesize from InsecureCachedNSEC
+// This is the key defense mechanism - matches ProVerif model
+
+// Option 2a: Cache miss, forward query
+// Corresponds to: out(resolver_to_ns, ...); out(c, (qid, qname))
+rule Resolver_Forward_Query:
+    [ ResolverProcessing(resolver_ip, zone, pk_zsk, qname, qid) ]
+  --[ ResolverForwardQuery(resolver_ip, qname, qid) ]->
+    [ Out(<'QUERY', qname, qid>)  // Forward to auth server
+    , Out(<qid, qname>)           // Leak query info to attacker (out(c, (qid, qname)))
+    , ResolverWaitingResponse(resolver_ip, zone, pk_zsk, qname, qid)
+    ]
+
+// Option 2b-i: NTA active - cache in INSECURE cache (SECURE)
+// Corresponds to: in(nta_channel, ...); out(insecure_cache, (INSECURE_NSEC, nta_zone, nsec))
+rule Resolver_Cache_During_NTA:
+    [ ResolverWaitingResponse(resolver_ip, zone, pk_zsk, qname, qid)
+    , NTA_Active(resolver_ip, zone)
+    , In(<qid, 'NXDOMAIN', nsec, sig, dnskey>)  // Response from network (server or attacker)
+    ]
+  --[ CacheNSECDuringNTA(resolver_ip, nsec, zone)
+    , CacheInsecureNSEC(resolver_ip, nsec)
+    ]->
+    // SECURE: Cache in INSECURE cache - CANNOT be used for synthesis
+    [ InsecureCachedNSEC(resolver_ip, zone, nsec)
+    , NTA_Active(resolver_ip, zone)  // Put NTA status back
+    , ResponseToClient(resolver_ip, qname, qid, 'NXDOMAIN')
+    ]
+
+// Option 2b-ii: No NTA - validate signature, cache in VALIDATED cache
+// Corresponds to: if verify(...) = true then if dnskey = trust_anchor then out(validated_cache, ...)
+rule Resolver_Cache_Validated_NSEC:
+    [ ResolverWaitingResponse(resolver_ip, zone, pk_zsk, qname, qid)
+    , In(<qid, 'NXDOMAIN', nsec, sig, pk_zsk>)  // Response with matching trust anchor
+    ]
+  --[ CacheValidatedNSEC(resolver_ip, nsec)
+    , Eq(verify(sig, nsec, pk_zsk), true)  // Signature must be valid
+    ]->
+    // SECURE: Cache in VALIDATED cache - can be used for synthesis
+    [ ValidatedCachedNSEC(resolver_ip, zone, nsec)
+    , ResponseToClient(resolver_ip, qname, qid, 'NXDOMAIN')
+    ]
+
+// Option 2b-iii: Invalid signature - reject
+rule Resolver_Reject_Invalid_Sig:
+    [ ResolverWaitingResponse(resolver_ip, zone, pk_zsk, qname, qid)
+    , In(<qid, 'NXDOMAIN', nsec, sig, dnskey>)
+    ]
+  --[ RejectInvalidSig(resolver_ip, nsec)
+    , Neq(verify(sig, nsec, dnskey), true)  // Signature is invalid
+    ]->
+    [ ResponseToClient(resolver_ip, qname, qid, 'SERVFAIL') ]
+
+// ============================================================
+// Restrictions
+// ============================================================
+
+restriction Equality:
+    "All x y #i. Eq(x,y) @i ==> x = y"
+
+restriction Inequality:
+    "All x y #i. Neq(x,y) @i ==> not(x = y)"
+
+// ============================================================
+// Security Properties (Lemmas)
+// Corresponds to ProVerif queries
+// ============================================================
+
+/*
+ * query qname: qname_t; event(LegitDomainDeniedFromInsecureCache(qname)).
+ * For SECURE implementation: should NOT find attack trace
+ *
+ * NOTE: In this secure model, there is no LegitDomainDeniedFromInsecureCache event
+ * because synthesis only happens from ValidatedCachedNSEC.
+ * We check that synthesis from NTA-cached NSEC is impossible.
+ */
+lemma no_synthesis_from_nta_cache:
+    all-traces
+    "All resolver nsec zone qname #t1 #t3.
+        (CacheNSECDuringNTA(resolver, nsec, zone) @ #t1 &
+         SynthesizeFromValidatedCache(resolver, qname, nsec) @ #t3 &
+         #t1 < #t3)
+        ==> F"
+
+/*
+ * query zone, nsec, qname, qid;
+ *     event(LegitDomainDeniedFromInsecureCache(qname)) &&
+ *     event(AttackerInjectNSEC(zone, nsec, qname, qid)).
+ * Full attack sequence - should be IMPOSSIBLE
+ */
+lemma attack_not_reachable:
+    all-traces
+    "All zone nsec qname qid resolver #t1 #t2 #t3.
+        (AttackerInjectNSEC(zone, nsec, qname, qid) @ #t1 &
+         CacheNSECDuringNTA(resolver, nsec, zone) @ #t2 &
+         SynthesizeFromValidatedCache(resolver, qname, nsec) @ #t3 &
+         #t1 < #t2 &
+         #t2 < #t3)
+        ==> F"
+
+/*
+ * query resolver, nsec, zone; event(CacheNSECDuringNTA(resolver, nsec, zone)).
+ * NTA bypass is still reachable (but cannot lead to synthesis)
+ */
+lemma nta_bypass_exists:
+    exists-trace
+    "Ex resolver nsec zone #i.
+        CacheNSECDuringNTA(resolver, nsec, zone) @ #i"
+
+/*
+ * query resolver, qname, nsec; event(SynthesizeFromValidatedCache(resolver, qname, nsec)).
+ * Validated cache synthesis is reachable (normal operation)
+ */
+lemma validated_synthesis_exists:
+    exists-trace
+    "Ex resolver qname nsec #i.
+        SynthesizeFromValidatedCache(resolver, qname, nsec) @ #i"
+
+/*
+ * query resolver, qname, nsec;
+ *     event(SynthesizeFromValidatedCache(resolver, qname, nsec)) ==>
+ *     event(CacheValidatedNSEC(resolver, nsec)).
+ * Security property: synthesis only from validated cache
+ */
+lemma synthesis_requires_validation:
+    all-traces
+    "All resolver qname nsec #t1.
+        SynthesizeFromValidatedCache(resolver, qname, nsec) @ #t1
+        ==>
+        (Ex #t0. CacheValidatedNSEC(resolver, nsec) @ #t0 & #t0 < #t1)"
+
+/*
+ * Attacker-injected NSEC never reaches validated cache
+ * This is the core security guarantee
+ */
+lemma attacker_nsec_not_validated:
+    all-traces
+    "All zone nsec qname qid resolver #t1 #t2.
+        (AttackerInjectNSEC(zone, nsec, qname, qid) @ #t1 &
+         CacheValidatedNSEC(resolver, nsec) @ #t2)
+        ==> F"
+
+end

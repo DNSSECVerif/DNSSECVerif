@@ -1,0 +1,273 @@
+/*
+ *  Model Name: rrsig_underflow_secure.spthy
+ *
+ *  FIXED version: adds condition (4b) check (signer_labels ≤ labels_field)
+ *
+ *  This prevents the RRSIG Labels underflow attack by blocking wildcard
+ *  cache writes when the signer zone's label count exceeds the Labels field.
+ */
+
+theory rrsig_underflow_secure
+begin
+
+builtins: hashing, signing
+
+functions:
+    star/1    // star(z) = *.z (wildcard name at zone z)
+
+// =============================================================================
+// Section 1. Restrictions
+// =============================================================================
+
+// Condition (6) check: signer must be authoritative for owner
+restriction Cond6_implies_bailiwick:
+    "All owner signer #i. Cond6_OK(owner, signer) @ i
+     ==> (Ex #j. InBailiwick(owner, signer) @ j & j < i)"
+
+
+// =============================================================================
+// Section 2. Init + Processes
+// =============================================================================
+
+// Ground InBailiwick facts.
+// Critical: 'nope_test' is NOT in-bailiwick for 'attacker_test'.
+let InitBailiwick =
+    event InBailiwick('test', 'test');
+    event InBailiwick('attacker_test', 'test');
+    event InBailiwick('attacker_test', 'attacker_test');
+    event InBailiwick('www_attacker_test', 'test');
+    event InBailiwick('www_attacker_test', 'attacker_test');
+    event InBailiwick('nope_test', 'test');
+    // NOTE: InBailiwick('nope_test', 'attacker_test') is ABSENT
+    0
+
+
+// Honest test. zone NSEC server (Q2 payload)
+// Wire format: <rr_type, owner, rdata, signer, labels_field, sig>
+let HonestTestServer(sk_test) =
+    let nsec_owner = 'attacker_test' in
+    let nsec_next  = 'bystander_test' in
+    let labels_field = 'L2' in  // owner has 2 labels, no wildcard
+    let msg = <'NSEC', nsec_owner, nsec_next, 'test'> in
+    let sig = sign(msg, sk_test) in
+    event HonestServer_Sending(nsec_owner, nsec_next);
+    out(<'NSEC', nsec_owner, nsec_next, 'test', labels_field, sig>)
+
+
+// Resolver: validate and cache
+// FIXED VERSION: condition (4b) is present
+let Resolver(~r_id, pk_test, pk_attacker_test) =
+    !(
+        in(<rr_type, owner, rdata, signer, labels_field, sig>);
+        event Resolver_Received(rr_type, owner, signer);
+
+        let msg = <rr_type, owner, rdata, signer> in
+
+        // Condition (1)-(3): implicit / abstracted
+        event Cond1_OK(signer, owner);
+        event Cond2_OK(signer, owner);
+        event Cond3_OK(signer, owner);
+
+        // Condition (4): labels_field ≤ owner_labels
+        // For this minimal model, we accept any labels_field (abstracted)
+        event Cond4_OK(signer, owner);
+
+        // *** FIXED: Condition (4b) ADDED ***
+        // Check: signer_labels ≤ labels_field
+        // For attacker_test (2 labels), labels_field must be 'L2' or 'L3'
+        // 'L1' is rejected because 2 > 1
+
+        // Condition (5): time (abstracted)
+        event Cond5_OK(signer, owner);
+
+        // Condition (6): signer authoritative for owner
+        event Cond6_OK(owner, signer);
+
+        // Condition (7): signature verification
+        (
+            if signer = 'test' then
+            (
+                if verify(sig, msg, pk_test) = true then
+                (
+                    event Cond7_OK(signer, owner);
+                    event Cond8_OK(signer, owner);
+                    event Validated(owner, rdata, signer);
+
+                    // Cache write for test. signer
+                    if rr_type = 'NSEC' then
+                    (
+                        event Cached_NSEC(~r_id, owner, rdata, signer);
+                        insert <'NSEC', ~r_id, owner>, <rdata, signer>
+                    )
+                    else
+                    (
+                        insert <'exact', ~r_id, owner, rr_type>, <rdata, signer>
+                    )
+                )
+            )
+            else if signer = 'attacker_test' then
+            (
+                if verify(sig, msg, pk_attacker_test) = true then
+                (
+                    event Cond7_OK(signer, owner);
+                    event Cond8_OK(signer, owner);
+                    event Validated(owner, rdata, signer);
+
+                    // FIXED: Condition (4b) check - signer_labels <= labels_field
+                    // attacker_test has 2 labels, so labels_field must be 'L2' or 'L3'
+                    // 'L1' is blocked - this prevents the cross-zone attack
+                    if labels_field = 'L2' then
+                    (
+                        if owner = 'www_attacker_test' then
+                        (
+                            // Wildcard at same level as signer - OK (within zone)
+                            event Cached_Wildcard(~r_id, star('attacker_test'), rr_type, rdata, signer);
+                            insert <'wildcard', ~r_id, star('attacker_test'), rr_type>, <rdata, signer>
+                        )
+                        else
+                        (
+                            insert <'exact', ~r_id, owner, rr_type>, <rdata, signer>
+                        )
+                    )
+                    else
+                    (
+                        insert <'exact', ~r_id, owner, rr_type>, <rdata, signer>
+                    )
+                )
+            )
+        )
+    )
+
+
+// RFC 8198 synthesis
+let Synth(~r_id) =
+    !(
+        in(<'query', q_name>);
+
+        // Check NSEC cache (any entry counts as proof of non-existence)
+        // We look for a specific NSEC owner to avoid unbound variable
+        lookup <'NSEC', ~r_id, 'attacker_test'> as nsec_entry in
+        (
+            // Check wildcard cache for *.test.
+            lookup <'wildcard', ~r_id, star('test'), 'A'> as wc_entry in
+            (
+                let <wc_rdata, wc_signer> = wc_entry in
+
+                // Synthesize AD=1 answer
+                // In attack: wc_signer = 'attacker_test', q_name = 'nope_test'
+                // But InBailiwick('nope_test', 'attacker_test') was NEVER emitted!
+                event AD_Answer_Signed_By(~r_id, q_name, wc_rdata, wc_signer);
+                out(<'answer', q_name, wc_rdata, 'AD=1'>)
+            )
+        )
+    )
+
+
+// =============================================================================
+// Section 3. Main process
+// =============================================================================
+
+process:
+    new ~sk_root;
+    new ~sk_test;
+    new ~sk_attacker_test;
+    new ~r_id;
+
+    event ModelInit();
+
+    // Leak attacker key
+    out(~sk_attacker_test);
+
+    // Init bailiwick table
+    event InBailiwick('test', 'test');
+    event InBailiwick('attacker_test', 'test');
+    event InBailiwick('attacker_test', 'attacker_test');
+    event InBailiwick('www_attacker_test', 'test');
+    event InBailiwick('www_attacker_test', 'attacker_test');
+    event InBailiwick('nope_test', 'test');
+    // InBailiwick('nope_test', 'attacker_test') is ABSENT - this is the key!
+
+    (
+        HonestTestServer(~sk_test)
+        ||
+        Resolver(~r_id, pk(~sk_test), pk(~sk_attacker_test))
+        ||
+        Synth(~r_id)
+        ||
+        // Key leak detector: triggers if attacker obtains honest keys
+        !(
+            in(x);
+            if x = ~sk_test then event HonestKeyLeaked(x)
+            else if x = ~sk_root then event HonestKeyLeaked(x)
+        )
+    )
+
+
+// =============================================================================
+// Section 4. Lemmas
+// =============================================================================
+
+/*
+ * zone_boundary_integrity
+ *
+ * Every AD=1 answer must be signed by a zone that covers the answered name.
+ *
+ * Expected: VERIFIED on this fixed model (Claim C).
+ * The condition (4b) check prevents cross-zone wildcard cache poisoning.
+ */
+lemma zone_boundary_integrity:
+    "All r name rdata signer #t1.
+        AD_Answer_Signed_By(r, name, rdata, signer) @ t1
+        ==>
+        (Ex #t2. InBailiwick(name, signer) @ t2 & t2 < t1)"
+
+
+/*
+ * attack_exists
+ *
+ * The attack trace is reachable.
+ *
+ * Expected: NO TRACE FOUND on fixed model.
+ * The attacker cannot cache under *.test. because labels_field='L1' is blocked.
+ */
+lemma attack_exists:
+    exists-trace
+    "Ex r rdata #t.
+        AD_Answer_Signed_By(r, 'nope_test', rdata, 'attacker_test') @ t"
+
+
+/*
+ * claim_A_all_eight_conditions_satisfied (Claim A)
+ *
+ * Attacker can still validate RRSIGs with Labels=2 (legitimate).
+ * This is expected - the fix blocks Labels=1 (cross-zone), not all attacker RRSIGs.
+ *
+ * Expected: VERIFIED (attacker can still use legitimate labels_field='L2')
+ */
+lemma claim_A_all_eight_conditions_satisfied:
+    exists-trace
+    "Ex owner rdata #t1 #t2 #t3 #t4 #t5 #t6 #t7 #t8 #tv.
+        Cond1_OK('attacker_test', owner) @ t1 &
+        Cond2_OK('attacker_test', owner) @ t2 &
+        Cond3_OK('attacker_test', owner) @ t3 &
+        Cond4_OK('attacker_test', owner) @ t4 &
+        Cond5_OK('attacker_test', owner) @ t5 &
+        Cond6_OK(owner, 'attacker_test') @ t6 &
+        Cond7_OK('attacker_test', owner) @ t7 &
+        Cond8_OK('attacker_test', owner) @ t8 &
+        Validated(owner, rdata, 'attacker_test') @ tv"
+
+
+/*
+ * sanity_honest_signing_keys_secret
+ *
+ * The attacker never learns the honest zone keys (sk_test, sk_root).
+ * Only sk_attacker_test is leaked intentionally.
+ *
+ * Expected: VERIFIED on both broken and fixed models
+ */
+lemma sanity_honest_signing_keys_secret:
+    "All sk #i. HonestKeyLeaked(sk) @ i ==> F"
+
+
+end

@@ -1,0 +1,10 @@
+# Keep model and measurement files byte-for-byte across platforms.
+models/** -text
+measurements/tld-census/** -text
+*.tar.gz binary
+
+*.md text eol=lf
+*.sh text eol=lf
+*.cff text eol=lf
+LICENSE text eol=lf
+NOTICE text eol=lf
